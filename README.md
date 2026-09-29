@@ -7,7 +7,7 @@
 На Linux сервере нужны Bash, curl и доступ в интернет. Для последней проверки установите `sysbench`; без него она будет помечена `SKIPPED`. Остальные утилиты, нужные отдельным проверкам, могут устанавливаться или запрашиваться самими исходными скриптами.
 
 ```bash
-git clone <URL_ЭТОГО_ПРИВАТНОГО_РЕПОЗИТОРИЯ>
+git clone https://github.com/KirillShchetinnikov/server-network-bench.git
 cd server-network-bench
 bash run.sh
 ```
@@ -21,11 +21,13 @@ bash run.sh --only ip-region --only censorcheck-geoblock
 
 Вывод каждой проверки сохраняется в `reports/<UTC-время>/<имя>.log` относительно текущего каталога, итог — в `summary.tsv`. Путь можно переопределить переменной `REPORT_DIR`. Другие проверки продолжаются, если одна завершилась ошибкой. При любой ошибке загрузки или выполнения общий код выхода равен 1. `SKIPPED` означает отсутствие `sysbench` и не считается ошибкой.
 
-Если `run.sh` размещён по публичному HTTPS адресу, его также можно скачать и запустить одной командой:
+Запуск напрямую через GitHub Pages на своём домене:
 
 ```bash
-curl -fsSLo /tmp/server-network-bench.sh https://YOUR-DOMAIN/run.sh && bash /tmp/server-network-bench.sh
+bash <(curl -fsSL https://bench.kipik1.ru/run.sh)
 ```
+
+Страница с описанием доступна по адресу <https://bench.kipik1.ru/>.
 
 По умолчанию YABS запускается с `-4`: это выбор **Geekbench 4**, как в исходной команде. Если нужна проверка IPv4 на более новой версии Geekbench, параметр следует изменить.
 
