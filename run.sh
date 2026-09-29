@@ -108,7 +108,8 @@ download() {
 }
 
 strip_terminal_controls() {
-  LC_ALL=C sed -u -E $'s/\033\\[[0-9;?]*[ -/]*[@-~]//g; s/\r//g'
+  LC_ALL=C sed -u -E $'s/\033\\][^\a\033]*(\a|\033\\\\)//g; s/\033\\[[0-?]*[ -/]*[@-~]//g; s/\033.//g' |
+    LC_ALL=C tr -d '\000-\010\013-\037\177'
 }
 
 run_check() {
