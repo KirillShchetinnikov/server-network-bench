@@ -2,8 +2,7 @@
 set -uo pipefail
 
 # Run the requested third-party checks one at a time and retain their output.
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-REPORT_DIR=${REPORT_DIR:-"$SCRIPT_DIR/reports/$(date -u +%Y%m%dT%H%M%SZ)"}
+REPORT_DIR=${REPORT_DIR:-"$PWD/reports/$(date -u +%Y%m%dT%H%M%SZ)"}
 
 checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench ipquality sysbench-cpu)
 selected=()
