@@ -2,7 +2,9 @@
 set -uo pipefail
 
 # Run the requested third-party checks one at a time and retain their output.
-REPORT_DIR=${REPORT_DIR:-"$PWD/reports/$(date -u +%Y%m%dT%H%M%SZ)"}
+RUN_TIME=$(date -u +%Y-%m-%d_%H-%M-%S_UTC)
+REPORT_DIR=${REPORT_DIR:-"$PWD/reports/$RUN_TIME"}
+REPORT_FILE="$REPORT_DIR/server-report-$RUN_TIME.txt"
 
 checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench ipquality sysbench-cpu)
 selected=()
@@ -13,7 +15,22 @@ Usage: ./run.sh [--only NAME ...] [--list] [--help]
 
 Run all checks by default. --only may be repeated to run selected checks.
 Set REPORT_DIR to choose where logs are saved.
+The combined report and a short summary are saved in that directory.
 EOF
+}
+
+check_title() {
+  case $1 in
+    ip-region) printf 'IP region' ;;
+    censorcheck-geoblock) printf 'Censorcheck: геоблок' ;;
+    censorcheck-dpi) printf 'Censorcheck: DPI' ;;
+    russian-iperf3) printf 'Скорость до российских iPerf3 серверов' ;;
+    yabs) printf 'YABS' ;;
+    ip-check) printf 'IP.Check.Place' ;;
+    bench) printf 'bench.sh' ;;
+    ipquality) printf 'IPQuality' ;;
+    sysbench-cpu) printf 'sysbench: CPU, один поток' ;;
+  esac
 }
 
 contains_check() {
@@ -85,7 +102,7 @@ run_check() {
 }
 
 printf 'check\tstatus\n' > "$REPORT_DIR/summary.tsv"
-printf 'Reports: %s\n' "$REPORT_DIR"
+printf 'Отчёт: %s\n' "$REPORT_FILE"
 for name in "${selected[@]}"; do
   case $name in
     ip-region) run_check "$name" 'https://ipregion.vrnt.xyz' ;;
@@ -100,10 +117,34 @@ for name in "${selected[@]}"; do
   esac
 done
 
-printf '\nSummary:\n'
-cat "$REPORT_DIR/summary.tsv"
-while IFS=$'\t' read -r check status; do
-  case $status in
-    DOWNLOAD_FAILED|FAILED\(*\)) exit 1 ;;
-  esac
-done < "$REPORT_DIR/summary.tsv"
+completed=0
+failed=0
+skipped=0
+{
+  printf 'Проверки сервера и сети\n'
+  printf 'Дата запуска (UTC): %s\n' "${RUN_TIME//_/ }"
+  printf 'Подробные логи: %s\n' "$REPORT_DIR"
+  for name in "${selected[@]}"; do
+    printf '\n========== %s ==========\n' "$(check_title "$name")"
+    cat "$REPORT_DIR/$name.log"
+  done
+  printf '\n========== КРАТКИЙ ИТОГ ==========\n'
+  while IFS=$'\t' read -r name status; do
+    [[ $name == check ]] && continue
+    case $status in
+      OK) result='завершено'; ((completed+=1)) ;;
+      SKIPPED) result='пропущено (sysbench не установлен)'; ((skipped+=1)) ;;
+      DOWNLOAD_FAILED) result='ошибка загрузки'; ((failed+=1)) ;;
+      FAILED\(*\)) result="ошибка выполнения ${status#FAILED}"; ((failed+=1)) ;;
+      *) result="$status"; ((failed+=1)) ;;
+    esac
+    printf '%s — %s\n' "$(check_title "$name")" "$result"
+  done < "$REPORT_DIR/summary.tsv"
+  printf 'Всего: %d; завершено: %d; ошибок: %d; пропущено: %d.\n' \
+    "${#selected[@]}" "$completed" "$failed" "$skipped"
+  printf 'Статус «завершено» означает, что команда отработала; оценки и результаты смотрите выше.\n'
+} > "$REPORT_FILE"
+
+sed -n '/^========== КРАТКИЙ ИТОГ ==========/,$p' "$REPORT_FILE"
+printf 'Полный отчёт: %s\n' "$REPORT_FILE"
+((failed == 0))
