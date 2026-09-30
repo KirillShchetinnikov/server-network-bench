@@ -98,8 +98,13 @@ if [[ $run_mode == background ]]; then
   exit 0
 fi
 
-WORK_DIR=$(mktemp -d) || exit 2
+if ! WORK_DIR=$(mktemp -d "$PWD/.server-network-bench-work.XXXXXXXX" 2>/dev/null); then
+  WORK_DIR=$(mktemp -d) || exit 2
+  printf 'Временный каталог создан в %s; тест диска будет измерять эту файловую систему.\n' "$WORK_DIR"
+fi
 trap 'rm -rf -- "$WORK_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 download() {
   local url=$1 file=$2
@@ -115,7 +120,9 @@ strip_terminal_controls() {
 run_check() {
   local name=$1 url=$2
   shift 2
-  local file="$WORK_DIR/$name.sh"
+  local check_dir file
+  check_dir=$(mktemp -d "$WORK_DIR/$name.XXXXXXXX") || exit 2
+  file="$check_dir/$name.sh"
   printf '\n===== %s =====\n' "$name"
   if [[ $name == sysbench-cpu ]]; then
     if ! command -v sysbench >/dev/null 2>&1; then
@@ -123,14 +130,14 @@ run_check() {
       printf '%s\tSKIPPED\n' "$name" >> "$REPORT_DIR/summary.tsv"
       return
     fi
-    sysbench cpu run --threads=1 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
+    (cd -- "$check_dir" && sysbench cpu run --threads=1) 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
   else
     if ! download "$url" "$file"; then
       printf 'FAILED: download from %s\n' "$url" | tee "$REPORT_DIR/$name.log"
       printf '%s\tDOWNLOAD_FAILED\n' "$name" >> "$REPORT_DIR/summary.tsv"
       return
     fi
-    bash "$file" "$@" 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
+    (cd -- "$check_dir" && bash "$file" "$@") 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
   fi
   local result=${PIPESTATUS[0]}
   if ((result == 0)); then
