@@ -6,7 +6,7 @@ RUN_TIME=${BENCH_RUN_TIME:-$(date -u +%Y-%m-%d_%H-%M-%S_UTC)}
 REPORT_DIR=${REPORT_DIR:-"$PWD/reports/$RUN_TIME"}
 PUBLISHED_URL='https://bench.kipik1.ru/run.sh'
 
-checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench ipquality sysbench-cpu)
+checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench sysbench-cpu)
 selected=()
 run_mode=background
 
@@ -18,6 +18,7 @@ Run all checks in the background by default, continuing after terminal exit.
 Use --foreground to keep output in the terminal. --only may be repeated.
 Set REPORT_DIR to choose where logs are saved.
 The combined report and a short summary are saved in that directory.
+--only ipquality is an alias for --only ip-check.
 EOF
 }
 
@@ -28,15 +29,15 @@ check_title() {
     censorcheck-dpi) printf 'Censorcheck: DPI' ;;
     russian-iperf3) printf 'Скорость до российских iPerf3 серверов' ;;
     yabs) printf 'YABS' ;;
-    ip-check) printf 'IP.Check.Place' ;;
+    ip-check) printf 'IP Quality Check (IP.Check.Place)' ;;
     bench) printf 'bench.sh' ;;
-    ipquality) printf 'IPQuality' ;;
     sysbench-cpu) printf 'sysbench: CPU, один поток' ;;
   esac
 }
 
 contains_check() {
   local wanted=$1 item
+  [[ $wanted == ipquality ]] && return 0
   for item in "${checks[@]}"; do
     [[ $item == "$wanted" ]] && return 0
   done
@@ -54,7 +55,13 @@ while (($#)); do
         printf 'Unknown or missing check after --only: %s\n' "${2:-}" >&2
         exit 2
       fi
-      selected+=("$2")
+      requested=$2
+      [[ $requested == ipquality ]] && requested=ip-check
+      duplicate=0
+      for item in "${selected[@]}"; do
+        [[ $item == "$requested" ]] && duplicate=1
+      done
+      ((duplicate == 1)) || selected+=("$requested")
       shift 2
       ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
@@ -193,7 +200,6 @@ for name in "${selected[@]}"; do
     yabs) run_check "$name" 'https://yabs.sh' -4 ;;
     ip-check) run_check "$name" 'https://ip.check.place' -l en -y ;;
     bench) run_check "$name" 'https://bench.sh' ;;
-    ipquality) run_check "$name" 'https://ip.check.place' -E -y ;;
     sysbench-cpu) run_check "$name" '' ;;
   esac
 done
