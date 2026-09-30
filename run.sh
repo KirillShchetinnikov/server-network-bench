@@ -113,8 +113,43 @@ download() {
 }
 
 strip_terminal_controls() {
+  local check=$1
   LC_ALL=C sed -u -E $'s/\033\\][^\a\033]*(\a|\033\\\\)//g; s/\033\\[[0-?]*[ -/]*[@-~]//g; s/\033.//g' |
-    LC_ALL=C tr -d '\000-\010\013-\037\177'
+    LC_ALL=C awk -v check="$check" '
+      {
+        # A carriage return redraws the same terminal line. Keep its final frame.
+        count = split($0, frames, "\r")
+        line = frames[count]
+        gsub(/[\001-\010\013\014\016-\037\177]/, "", line)
+        if (count > 1 && line == "") next
+
+        # IP Quality prints a long sponsor animation before the actual report.
+        if ((check == "ip-check" || check == "ipquality") && !report_started) {
+          if (index(line, "IP QUALITY CHECK REPORT:") > 0) {
+            report_started = 1
+          } else {
+            preamble = preamble line "\n"
+            next
+          }
+        }
+        if (check == "russian-iperf3" && line ~ /^Testing .*\.\.\./) next
+        if (check == "ip-region" && line ~ /Checking: /) next
+        if (check ~ /^censorcheck-/ && line ~ /^\[[0-9]+\/[0-9]+\] Checking:/) next
+        if (check == "yabs" && line ~ /^Performing IPv4 iperf3/ && line ~ /\|/)
+          sub(/^.*\.\.\./, "", line)
+        if (check == "yabs" && line ~ /^Preparing system.*fio Disk Speed Tests/)
+          sub(/^.*fio Disk Speed Tests/, "fio Disk Speed Tests", line)
+        if (check == "yabs" && line ~ /^Running GB4 benchmark test.*Geekbench 4 Benchmark Test:/)
+          sub(/^.*Geekbench 4 Benchmark Test:/, "Geekbench 4 Benchmark Test:", line)
+        print line
+        fflush()
+      }
+      END {
+        # Preserve diagnostics when IP Quality exits before producing a report.
+        if ((check == "ip-check" || check == "ipquality") && !report_started)
+          printf "%s", preamble
+      }
+    '
 }
 
 run_check() {
@@ -130,14 +165,14 @@ run_check() {
       printf '%s\tSKIPPED\n' "$name" >> "$REPORT_DIR/summary.tsv"
       return
     fi
-    (cd -- "$check_dir" && sysbench cpu run --threads=1) 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
+    (cd -- "$check_dir" && sysbench cpu run --threads=1) 2>&1 | strip_terminal_controls "$name" | tee "$REPORT_DIR/$name.log"
   else
     if ! download "$url" "$file"; then
       printf 'FAILED: download from %s\n' "$url" | tee "$REPORT_DIR/$name.log"
       printf '%s\tDOWNLOAD_FAILED\n' "$name" >> "$REPORT_DIR/summary.tsv"
       return
     fi
-    (cd -- "$check_dir" && bash "$file" "$@") 2>&1 | strip_terminal_controls | tee "$REPORT_DIR/$name.log"
+    (cd -- "$check_dir" && bash "$file" "$@") 2>&1 | strip_terminal_controls "$name" | tee "$REPORT_DIR/$name.log"
   fi
   local result=${PIPESTATUS[0]}
   if ((result == 0)); then
