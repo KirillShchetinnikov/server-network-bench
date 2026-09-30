@@ -33,6 +33,8 @@ bash run.sh --only ipquality  # прежнее имя для --only ip-check
 
 Каждая сторонняя проверка запускается в своём временном каталоге рядом с текущим каталогом. После завершения скрипта он удаляется вместе с загруженными программами и промежуточными файлами, например `speedtest-cli` и `geekbench_claim.url`. Каталог отчётов сохраняется. Если текущий каталог недоступен для записи, временный каталог создаётся в системном `/tmp`; тогда тест диска измеряет файловую систему `/tmp`.
 
+В начале текстового и Markdown отчётов указана ссылка на этот проект. Под названием каждой проверки приведена ссылка на её исходный код в GitHub; названия в Markdown сводке тоже открывают соответствующие репозитории.
+
 Запуск напрямую через GitHub Pages на своём домене:
 
 ```bash
@@ -54,10 +56,10 @@ bash <(curl -fsSL https://bench.kipik1.ru/run.sh)
 
 ## Источники
 
-- [IP region](https://ipregion.vrnt.xyz)
-- [Censorcheck](https://github.com/vernette/censorcheck)
-- [Российские iPerf3 серверы](https://github.com/itdoginfo/russian-iperf3-servers)
-- [YABS](https://github.com/masonr/yet-another-bench-script)
-- [IP.Check.Place](https://ip.check.place)
-- [bench.sh](https://bench.sh)
+- [IP region](https://github.com/vernette/ipregion/blob/master/ipregion.sh)
+- [Censorcheck](https://github.com/vernette/censorcheck/blob/master/censorcheck.sh)
+- [Российские iPerf3 серверы](https://github.com/itdoginfo/russian-iperf3-servers/blob/main/speedtest.sh)
+- [YABS](https://github.com/masonr/yet-another-bench-script/blob/master/yabs.sh)
+- [IP.Check.Place](https://github.com/xykt/IPQuality/blob/main/ip.sh)
+- [bench.sh](https://github.com/teddysun/across/blob/master/bench.sh)
 - [sysbench](https://github.com/akopytov/sysbench)

@@ -5,6 +5,7 @@ set -uo pipefail
 RUN_TIME=${BENCH_RUN_TIME:-$(date -u +%Y-%m-%d_%H-%M-%S_UTC)}
 REPORT_DIR=${REPORT_DIR:-"$PWD/reports/$RUN_TIME"}
 PUBLISHED_URL='https://bench.kipik1.ru/run.sh'
+PROJECT_URL='https://github.com/KirillShchetinnikov/server-network-bench'
 
 checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench sysbench-cpu)
 selected=()
@@ -32,6 +33,18 @@ check_title() {
     ip-check) printf 'IP Quality Check (IP.Check.Place)' ;;
     bench) printf 'bench.sh' ;;
     sysbench-cpu) printf 'sysbench: CPU, один поток' ;;
+  esac
+}
+
+check_source_url() {
+  case $1 in
+    ip-region) printf 'https://github.com/vernette/ipregion/blob/master/ipregion.sh' ;;
+    censorcheck-geoblock|censorcheck-dpi) printf 'https://github.com/vernette/censorcheck/blob/master/censorcheck.sh' ;;
+    russian-iperf3) printf 'https://github.com/itdoginfo/russian-iperf3-servers/blob/main/speedtest.sh' ;;
+    yabs) printf 'https://github.com/masonr/yet-another-bench-script/blob/master/yabs.sh' ;;
+    ip-check) printf 'https://github.com/xykt/IPQuality/blob/main/ip.sh' ;;
+    bench) printf 'https://github.com/teddysun/across/blob/master/bench.sh' ;;
+    sysbench-cpu) printf 'https://github.com/akopytov/sysbench' ;;
   esac
 }
 
@@ -100,6 +113,7 @@ if [[ $run_mode == background ]]; then
     nohup bash "$runner" "${child_args[@]}" > "$REPORT_DIR/live-output.log" 2>&1 < /dev/null &
   pid=$!
   printf '%s\n' "$pid" > "$REPORT_DIR/pid"
+  printf 'Проект: %s\n' "$PROJECT_URL"
   printf 'Запущено в фоне, PID: %s\n' "$pid"
   printf 'Ход проверок: tail -f %q\n' "$REPORT_DIR/live-output.log"
   printf 'Итоговый отчёт: %s\n' "$REPORT_FILE"
@@ -246,6 +260,7 @@ server_disk=$(df -hP "$PWD" 2>/dev/null | awk 'NR == 2 {printf "%s всего, %
 [[ -n $server_disk ]] || server_disk='н/д'
 
 printf 'check\tstatus\tduration_seconds\n' > "$REPORT_DIR/summary.tsv"
+printf 'Проект: %s\n' "$PROJECT_URL"
 printf 'Отчёт: %s\n' "$REPORT_FILE"
 printf 'Отчёт Markdown: %s\n' "$REPORT_MD_FILE"
 for name in "${selected[@]}"; do
@@ -290,10 +305,12 @@ server_fields=(
 
 {
   printf 'Проверки сервера и сети\n'
+  printf 'Проект: %s\n' "$PROJECT_URL"
   printf 'Дата запуска (UTC): %s\n' "${RUN_TIME//_/ }"
   printf '\n========== ЛОГИ ПРОВЕРОК ==========\n'
   for name in "${selected[@]}"; do
     printf '\n========== %s ==========\n' "$(check_title "$name")"
+    printf 'GitHub: %s\n' "$(check_source_url "$name")"
     cat "$REPORT_DIR/$name.log"
   done
   printf '\n========== ОБЩИЙ ОТЧЁТ ==========\n'
@@ -304,7 +321,9 @@ server_fields=(
   printf '\nРезультаты проверок:\n'
   while IFS=$'\t' read -r name status duration; do
     [[ $name == check ]] && continue
-    printf '%s — %s; время: %s\n' "$(check_title "$name")" "$(status_label "$status")" "$(format_duration "$duration")"
+    printf '%s\n  GitHub: %s\n  Статус: %s; время: %s\n' \
+      "$(check_title "$name")" "$(check_source_url "$name")" \
+      "$(status_label "$status")" "$(format_duration "$duration")"
   done < "$REPORT_DIR/summary.tsv"
   printf 'Общее время: %s\n' "$(format_duration "$total_duration")"
   printf 'Всего: %d; завершено: %d; ошибок: %d; пропущено: %d.\n' \
@@ -314,10 +333,12 @@ server_fields=(
 
 {
   printf '# Проверки сервера и сети\n\n'
+  printf '**Проект:** [GitHub](%s)\n\n' "$PROJECT_URL"
   printf '**Дата запуска (UTC):** %s\n\n' "${RUN_TIME//_/ }"
   printf '## Логи проверок\n'
   for name in "${selected[@]}"; do
     printf '\n### %s\n\n' "$(check_title "$name")"
+    printf '[Исходный код на GitHub](%s)\n\n' "$(check_source_url "$name")"
     sed 's/^/    /' "$REPORT_DIR/$name.log"
   done
   printf '\n## Общий отчёт\n\n'
@@ -328,7 +349,8 @@ server_fields=(
   printf '\n### Результаты проверок\n\n| Проверка | Статус | Время |\n| --- | --- | ---: |\n'
   while IFS=$'\t' read -r name status duration; do
     [[ $name == check ]] && continue
-    printf '| %s | %s | %s |\n' "$(check_title "$name")" "$(status_label "$status")" "$(format_duration "$duration")"
+    printf '| [%s](%s) | %s | %s |\n' "$(check_title "$name")" "$(check_source_url "$name")" \
+      "$(status_label "$status")" "$(format_duration "$duration")"
   done < "$REPORT_DIR/summary.tsv"
   printf '\n**Общее время:** %s  \n' "$(format_duration "$total_duration")"
   printf '**Всего:** %d; завершено: %d; ошибок: %d; пропущено: %d.\n\n' \
