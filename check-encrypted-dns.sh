@@ -18,11 +18,162 @@ set -u
 # Запуск:
 #   chmod +x check-encrypted-dns.sh
 #   ./check-encrypted-dns.sh
+#   ./check-encrypted-dns.sh --lang en
+#   DNS_LANG=en ./check-encrypted-dns.sh
 #
 # ============================================================
 
 TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
 TIMEOUT="${TIMEOUT:-5}"
+DNS_LANG="${DNS_LANG:-ru}"
+
+# Перевод применяется только при выводе; внутренние статусы и метрики
+# сохраняют одинаковый формат независимо от выбранного языка.
+msg()
+{
+    if [[ "$DNS_LANG" == en ]]; then
+        printf '%s' "$2"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+status_text()
+{
+    case "$1" in
+        OK) msg 'ДОСТУПЕН' 'OK' ;;
+        SKIP) msg 'ПРОПУЩЕН' 'SKIP' ;;
+        BLOCKED|FAIL) msg 'НЕДОСТУПЕН' 'BLOCKED' ;;
+    esac
+}
+
+localize_details()
+{
+    local details="$1" english russian
+    if [[ "$DNS_LANG" == ru ]]; then
+        while IFS='|' read -r english russian; do
+            details="${details//"$english"/"$russian"}"
+        done <<'TRANSLATIONS'
+connection closed before DNS response|соединение закрыто до получения DNS-ответа
+connection closed during DNS response|соединение закрыто во время получения DNS-ответа
+invalid DNS transaction ID|неверный идентификатор DNS-запроса
+packet is not DNS response|пакет не является DNS-ответом
+invalid/unusable DNS response|некорректный или непригодный DNS-ответ
+unusable DNS response|непригодный DNS-ответ
+invalid DNS response|некорректный DNS-ответ
+invalid DNS question|DNS-вопрос не совпадает с запросом
+certificate verify failed|ошибка проверки сертификата
+TLS handshake failed|ошибка согласования TLS
+DNS resolve failed|не удалось определить IP-адрес
+TCP connect failed|не удалось установить TCP-соединение
+connection refused|соединение отклонено
+connection reset|соединение сброшено
+connection failed|не удалось установить соединение
+connection closed|соединение закрыто
+No route to host|нет маршрута до сервера
+Network unreachable|сеть недоступна
+Network is unreachable|сеть недоступна
+Connection reset by peer|соединение сброшено сервером
+Connection refused|соединение отклонено
+Connection timed out|время ожидания соединения истекло
+timed out|время ожидания истекло
+Name or service not known|имя или служба неизвестны
+Temporary failure in name resolution|временная ошибка определения IP-адреса
+Operation not permitted|операция не разрешена
+Permission denied|доступ запрещён
+curl error|ошибка curl
+timeout|время ожидания истекло
+not configured|адрес не указан
+INVALID_QUESTION|DNS-вопрос не совпадает с запросом
+INVALID_ID|неверный идентификатор DNS-запроса
+NOT_RESPONSE|пакет не является DNS-ответом
+UNUSABLE|непригодный DNS-ответ
+INVALID|некорректный DNS-ответ
+invalid DNS name|некорректное DNS-имя
+truncated DNS pointer|неполный DNS-указатель
+invalid DNS label|некорректная метка DNS-имени
+truncated DNS label|неполная метка DNS-имени
+short DNS response|слишком короткий DNS-ответ
+unrelated DNS response|ответ не соответствует запросу
+unrelated DNS question|DNS-вопрос не соответствует запросу
+truncated DNS record data|неполные данные DNS-записи
+truncated DNS record|неполная DNS-запись
+trailing DNS data|лишние данные в DNS-ответе
+DNS response from TEST-NET|DNS-ответ от адреса TEST-NET
+no DNS response|нет DNS-ответа
+INTERCEPTED|ПЕРЕХВАТ
+NO_REPLY|НЕТ ОТВЕТА
+INCONCLUSIVE|НЕОПРЕДЕЛЁННО
+Evidence of interception/redirection of unencrypted DNS detected.|Обнаружен признак перехвата/перенаправления незашифрованного DNS.
+No interception detected by this test; selective interception cannot be ruled out.|Перехват не обнаружен этим тестом; выборочный перехват не исключён.
+This test cannot identify who redirects queries: ISP, router, VPN or local software.|Тест не определяет, кто перенаправляет запросы: провайдер, роутер, VPN или локальное ПО.
+total=|всего=
+query=|запрос=
+answers=|ответов=
+TRANSLATIONS
+        while [[ "$details" =~ ([0-9]+)ms ]]; do
+            details="${details//"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}мс"}"
+        done
+    fi
+    printf '%s\n' "$details"
+}
+
+print_help()
+{
+    msg 'Проверка шифрованного DNS и перехвата обычного DNS' \
+        'Encrypted DNS connectivity and plain DNS interception checker'
+    printf '\n\n'
+    msg 'Запуск: bash check-encrypted-dns.sh [--lang ru|en] ["ИМЯ|АДРЕС" ...]' \
+        'Usage: bash check-encrypted-dns.sh [--lang ru|en] ["NAME|ADDRESS" ...]'
+    printf '\n\n'
+    msg '  --lang ru|en  Язык вывода: русский (по умолчанию) или английский' \
+        '  --lang ru|en  Output language: Russian (default) or English'
+    printf '\n'
+    msg '  -h, --help    Показать справку' '  -h, --help    Show help'
+    printf '\n\n'
+    msg 'Переменные: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5' \
+        'Environment: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5'
+    printf '\n\n'
+    msg 'Форматы провайдеров (аргументы заменяют встроенный список):' \
+        'Provider formats (arguments replace the built-in list):'
+    printf '\n'
+    printf '  "Google|dns.google"\n  "DoH only|https://dns.google/dns-query"\n  "DoT only|dns.google|"\n  "Cloudflare|one.one.one.one|https://cloudflare-dns.com/dns-query"\n'
+}
+
+CUSTOM_PROVIDERS=()
+show_help=false
+while (( $# > 0 )); do
+    case "$1" in
+        --lang)
+            if (( $# < 2 )); then
+                msg 'Ошибка: после --lang укажите ru или en.' \
+                    'Error: --lang requires ru or en.' >&2
+                printf '\n' >&2
+                exit 1
+            fi
+            DNS_LANG="$2"
+            shift 2
+            ;;
+        --lang=*) DNS_LANG="${1#*=}"; shift ;;
+        -h|--help) show_help=true; shift ;;
+        --) shift; CUSTOM_PROVIDERS+=("$@"); break ;;
+        -*)
+            printf '%s %s\n' "$(msg 'Ошибка: неизвестный параметр' 'Error: unknown option')" "$1" >&2
+            exit 1
+            ;;
+        *) CUSTOM_PROVIDERS+=("$1"); shift ;;
+    esac
+done
+
+if [[ "$DNS_LANG" != ru && "$DNS_LANG" != en ]]; then
+    printf '%s: %s (ru|en)\n' "$(msg 'Ошибка: неподдерживаемый язык' 'Error: unsupported language')" "$DNS_LANG" >&2
+    exit 1
+fi
+export DNS_LANG
+if $show_help; then
+    print_help
+    exit 0
+fi
 
 # Формат:
 # NAME|DOT_HOST|DOH_URL — любой адрес можно оставить пустым.
@@ -108,8 +259,8 @@ PROVIDERS=(
     "CERT-EE||https://dns.cert.ee/dns-query"
 )
 
-if (( $# > 0 )); then
-    PROVIDERS=("$@")
+if (( ${#CUSTOM_PROVIDERS[@]} > 0 )); then
+    PROVIDERS=("${CUSTOM_PROVIDERS[@]}")
 fi
 
 parse_provider()
@@ -117,7 +268,7 @@ parse_provider()
     local entry="$1" address
     name="" dot_host="" doh_url=""
     if [[ "$entry" != *'|'* ]]; then
-        echo "ERROR: expected NAME|ADDRESS: $entry" >&2
+        printf '%s: %s\n' "$(msg 'Ошибка: ожидается ИМЯ|АДРЕС' 'Error: expected NAME|ADDRESS')" "$entry" >&2
         return 1
     fi
     name="${entry%%|*}"
@@ -132,7 +283,7 @@ parse_provider()
     fi
     if [[ -z "$name" || ( -z "$dot_host" && -z "$doh_url" ) ||
           "$doh_url" == *'|'* || ( -n "$doh_url" && "$doh_url" != https://* ) ]]; then
-        echo "ERROR: invalid provider record: $entry" >&2
+        printf '%s: %s\n' "$(msg 'Ошибка: некорректная запись провайдера' 'Error: invalid provider record')" "$entry" >&2
         return 1
     fi
 }
@@ -141,7 +292,7 @@ declare -A PROVIDER_NAMES
 for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
     if [[ -n "${PROVIDER_NAMES[$name]:-}" ]]; then
-        echo "ERROR: duplicate provider name: $name" >&2
+        printf '%s: %s\n' "$(msg 'Ошибка: повторяющееся имя провайдера' 'Error: duplicate provider name')" "$name" >&2
         exit 1
     fi
     PROVIDER_NAMES["$name"]=1
@@ -153,13 +304,14 @@ done
 
 for cmd in curl python3; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "ERROR: command '$cmd' not found"
+        printf '%s: %s\n' "$(msg 'Ошибка: команда не найдена' 'Error: command not found')" "$cmd" >&2
         exit 1
     fi
 done
 
 if ! python3 - "$TIMEOUT" <<'PY'
 import math
+import os
 import sys
 
 try:
@@ -167,7 +319,8 @@ try:
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError()
 except ValueError:
-    print("ERROR: TIMEOUT must be a positive number", file=sys.stderr)
+    print("Error: TIMEOUT must be a positive number" if os.environ["DNS_LANG"] == "en"
+          else "Ошибка: TIMEOUT должен быть положительным числом", file=sys.stderr)
     sys.exit(1)
 PY
 then
@@ -229,7 +382,10 @@ print(
 PY
 }
 
-DNS_QUERY_B64="$(generate_dns_query)" || exit 1
+if ! DNS_QUERY_B64="$(generate_dns_query 2>/dev/null)"; then
+    printf '%s: %s\n' "$(msg 'Ошибка: некорректный TEST_DOMAIN' 'Error: invalid TEST_DOMAIN')" "$TEST_DOMAIN" >&2
+    exit 1
+fi
 
 # ------------------------------------------------------------
 # DoH
@@ -789,10 +945,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
 for (ip, proto), (status, details) in zip(jobs, results):
     print(f"  {ip:15} {proto}/53 {status:12} {details}")
 if any(status == "INTERCEPTED" for status, _ in results):
-    print("  Обнаружен признак перехвата/перенаправления незашифрованного DNS.")
+    print("  Evidence of interception/redirection of unencrypted DNS detected.")
 else:
-    print("  Перехват не обнаружен этим тестом; выборочный перехват не исключён.")
-print("  Тест не определяет, кто перенаправляет запросы: провайдер, роутер, VPN или локальное ПО.")
+    print("  No interception detected by this test; selective interception cannot be ruled out.")
+print("  This test cannot identify who redirects queries: ISP, router, VPN or local software.")
 PY
 }
 
@@ -821,35 +977,39 @@ print_result()
     local result="$3"
 
     local status="${result%%|*}"
-    local details="${result#*|}"
+    local details color
+    details="$(localize_details "${result#*|}")"
 
     if [[ "$status" == "OK" ]]; then
-        printf \
-            "%-16s %-5s ${GREEN}%-7s${RESET} %s\n" \
-            "$provider" \
-            "$proto" \
-            "OK" \
-            "$details"
+        color="$GREEN"
     elif [[ "$status" == "SKIP" ]]; then
-        printf "%-16s %-5s ${YELLOW}%-7s${RESET} %s\n" \
-            "$provider" "$proto" "SKIP" "$details"
+        color="$YELLOW"
     else
-        printf \
-            "%-16s %-5s ${RED}%-7s${RESET} %s\n" \
-            "$provider" \
-            "$proto" \
-            "BLOCKED" \
-            "$details"
+        color="$RED"
     fi
+    print_cell "$provider" 18
+    print_cell "$proto" 10
+    printf '%s' "$color"
+    print_cell "$(status_text "$status")" 18
+    printf '%s%s\n' "$RESET" "$details"
+}
+
+# Дополняем по числу символов, чтобы кириллица не сдвигала столбцы.
+print_cell()
+{
+    local value="$1" width="$2" padding
+    padding=$((width - ${#value}))
+    (( padding < 1 )) && padding=1
+    printf '%s%*s' "$value" "$padding" ''
 }
 
 query_time()
 {
     local result="$1"
     if [[ "$result" =~ query=([0-9]+)ms ]]; then
-        printf '%sms' "${BASH_REMATCH[1]}"
+        printf '%s%s' "${BASH_REMATCH[1]}" "$(msg 'мс' 'ms')"
     else
-        printf 'n/a'
+        msg 'нет данных' 'n/a'
     fi
 }
 
@@ -858,16 +1018,15 @@ query_time()
 # ------------------------------------------------------------
 
 echo
-echo "Encrypted DNS connectivity test"
-echo "Test query : ${TEST_DOMAIN} A"
-echo "Timeout    : ${TIMEOUT}s"
+echo "$(msg 'Проверка доступности шифрованного DNS' 'Encrypted DNS connectivity test')"
+printf '%s: %s A\n' "$(msg 'Тестовый запрос' 'Test query')" "$TEST_DOMAIN"
+printf '%s: %s%s\n' "$(msg 'Время ожидания' 'Timeout')" "$TIMEOUT" "$(msg 'с' 's')"
 echo
 
-printf "%-16s %-5s %-7s %s\n" \
-    "PROVIDER" \
-    "PROTO" \
-    "STATUS" \
-    "DETAILS"
+print_cell "$(msg 'ПРОВАЙДЕР' 'PROVIDER')" 18
+print_cell "$(msg 'ПРОТОКОЛ' 'PROTO')" 10
+print_cell "$(msg 'СТАТУС' 'STATUS')" 18
+printf '%s\n' "$(msg 'ПОДРОБНОСТИ' 'DETAILS')"
 
 printf '%*s\n' 90 '' | tr ' ' '-'
 
@@ -904,13 +1063,12 @@ done
 # ------------------------------------------------------------
 
 echo
-echo "Summary"
+echo "$(msg 'Сводная таблица' 'Summary')"
 printf '%*s\n' 60 '' | tr ' ' '-'
 
-printf "%-16s %-18s %-18s\n" \
-    "PROVIDER" \
-    "DoT/853" \
-    "DoH/443"
+print_cell "$(msg 'ПРОВАЙДЕР' 'PROVIDER')" 18
+print_cell 'DoT/853' 26
+printf '%s\n' 'DoH/443'
 
 for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
@@ -922,57 +1080,57 @@ for provider_data in "${PROVIDERS[@]}"; do
     doh_status="${doh%%|*}"
 
     if [[ "$dot_status" == "OK" ]]; then
-        dot_display="OK ($(query_time "$dot"))"
+        dot_display="$(status_text OK) ($(query_time "$dot"))"
     elif [[ "$dot_status" == "SKIP" ]]; then
-        dot_display="SKIP"
+        dot_display="$(status_text SKIP)"
     else
-        dot_display="BLOCKED"
+        dot_display="$(status_text BLOCKED)"
     fi
 
     if [[ "$doh_status" == "OK" ]]; then
-        doh_display="OK ($(query_time "$doh"))"
+        doh_display="$(status_text OK) ($(query_time "$doh"))"
     elif [[ "$doh_status" == "SKIP" ]]; then
-        doh_display="SKIP"
+        doh_display="$(status_text SKIP)"
     else
-        doh_display="BLOCKED"
+        doh_display="$(status_text BLOCKED)"
     fi
 
-    printf "%-16s %-18s %-18s\n" \
-        "$name" \
-        "$dot_display" \
-        "$doh_display"
+    print_cell "$name" 18
+    print_cell "$dot_display" 26
+    printf '%s\n' "$doh_display"
 
 done
 
 echo
-echo "Interpretation:"
-echo "  OK      = TLS verified + DNS query succeeded (rcode=0, answers>0)"
-echo "  BLOCKED = failure at DNS/TCP/TLS/HTTP/DNS-response stage"
-echo "            A failure alone does not prove intentional blocking."
-echo "  SKIP    = protocol address not configured"
-echo "  query   = DNS request/response time, excluding connection setup"
-echo "  total   = connection setup + DNS request/response time"
+echo "$(msg 'Пояснения:' 'Interpretation:')"
+echo "$(msg '  ДОСТУПЕН   = TLS-сертификат проверен, DNS-запрос успешен (rcode=0, ответов>0)' '  OK      = TLS verified + DNS query succeeded (rcode=0, answers>0)')"
+echo "$(msg '  НЕДОСТУПЕН = ошибка определения IP-адреса, TCP, TLS, HTTP или DNS-ответа' '  BLOCKED = failure at DNS/TCP/TLS/HTTP/DNS-response stage')"
+echo "$(msg '               Ошибка сама по себе не доказывает намеренную блокировку.' '            A failure alone does not prove intentional blocking.')"
+echo "$(msg '  ПРОПУЩЕН   = адрес протокола не указан' '  SKIP    = protocol address not configured')"
+echo "$(msg '  запрос     = время обмена DNS-запросом и ответом без установки соединения' '  query   = DNS request/response time, excluding connection setup')"
+echo "$(msg '  всего      = установка соединения и обмен DNS-запросом и ответом' '  total   = connection setup + DNS request/response time')"
 echo
 
-echo "Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)"
-check_plain_dns_interception
+echo "$(msg 'Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)' 'Unencrypted DNS interception test (UDP/53 and TCP/53)')"
+localize_details "$(check_plain_dns_interception)"
 
 echo
-echo "Доступные DNS, которые можно использовать (на момент проверки):"
+echo "$(msg 'Доступные DNS, которые можно использовать (на момент проверки):' 'Available DNS services you can use (at the time of this test):')"
 available=0
 for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
     if [[ "${DOT_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoT: %s (порт 853) — ответ: %s\n' \
-            "$name" "$dot_host" "$(query_time "${DOT_RESULTS[$name]}")"
+        printf '  %-16s DoT: %s (%s 853) — %s: %s\n' \
+            "$name" "$dot_host" "$(msg 'порт' 'port')" \
+            "$(msg 'ответ' 'response')" "$(query_time "${DOT_RESULTS[$name]}")"
         available=$((available + 1))
     fi
     if [[ "${DOH_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoH: %s — ответ: %s\n' \
-            "$name" "$doh_url" "$(query_time "${DOH_RESULTS[$name]}")"
+        printf '  %-16s DoH: %s — %s: %s\n' \
+            "$name" "$doh_url" "$(msg 'ответ' 'response')" "$(query_time "${DOH_RESULTS[$name]}")"
         available=$((available + 1))
     fi
 done
 if (( available == 0 )); then
-    echo "  Нет DNS, успешно прошедших проверку."
+    echo "$(msg '  Нет DNS, успешно прошедших проверку.' '  No DNS services passed the checks.')"
 fi
