@@ -43,6 +43,69 @@ PROVIDERS=(
     "DNSPod|dot.pub|https://dns.pub/dns-query"
     "AliDNS||https://dns.alidns.com/dns-query"
     "360DNS||https://doh.360.cn/dns-query"
+
+    # Ещё 30 сервисов. Адреса сверены с источниками операторов 2026-10-07.
+    # DoT оставлен пустым, если источник подтверждает только DoH.
+    # https://docs.controld.com/docs/free-dns
+    "ControlD|p0.freedns.controld.com|https://freedns.controld.com/p0"
+    # https://meta.wikimedia.org/wiki/Wikimedia_DNS
+    "Wikimedia|wikimedia-dns.org|https://wikimedia-dns.org/dns-query"
+    # https://joindns4.eu/for-public
+    "DNS4EU|unfiltered.joindns4.eu|https://unfiltered.joindns4.eu/dns-query"
+    # https://umbrella.cisco.com/blog/enhancing-support-dns-encryption-with-dns-over-https
+    "OpenDNS|dns.opendns.com|https://dns.opendns.com/dns-query"
+    # https://libredns.gr/
+    "LibreDNS|dot.libredns.gr|https://doh.libredns.gr/dns-query"
+    # https://dnsforge.de/
+    "dnsforge|dnsforge.de|https://dnsforge.de/dns-query"
+    # https://dnswarden.com/
+    "DNSwarden|uncensored.dns.dnswarden.com|https://dns.dnswarden.com/uncensored"
+    # https://www.digitale-gesellschaft.ch/dns/
+    "DigitaleGesell.|dns.digitale-gesellschaft.ch|https://dns.digitale-gesellschaft.ch/dns-query"
+    # https://ffmuc.net/wiki/doku.php?id=knb:dohdot
+    "FFMUC|dot.ffmuc.net|https://doh.ffmuc.net/dns-query"
+    # https://blog.uncensoreddns.org/dns-servers/
+    "UncensoredDNS|anycast.uncensoreddns.org|https://anycast.uncensoreddns.org/dns-query"
+    # https://www.fdn.fr/actions/dns/
+    "FDN|ns0.fdn.fr|https://ns0.fdn.fr/dns-query"
+    # https://rethinkdns.com/configure
+    "RethinkDNS||https://sky.bravedns.com/"
+    # https://applied-privacy.net/services/dns/
+    "AppliedPrivacy|dot1.applied-privacy.net|https://doh.applied-privacy.net/query"
+    # https://www.cira.ca/en/how-canadian-shield-works/
+    "CIRA|private.canadianshield.cira.ca|https://private.canadianshield.cira.ca/dns-query"
+    # https://www.comss.ru/page.php?id=7315
+    "Comss.one|dns.comss.one|https://dns.comss.one/dns-query"
+    # https://www.nic.cz/odvr/
+    "CZ.NIC|odvr.nic.cz|https://odvr.nic.cz/"
+    # https://policy.public.dns.iij.jp/
+    "IIJ|public.dns.iij.jp|https://public.dns.iij.jp/dns-query"
+    # https://restena.lu/en/document/190-configuring-your-server-public-dns-resolver
+    "Restena|dnspub.restena.lu|https://dnspub.restena.lu/dns-query"
+    # https://portal.switch.ch/pub/public-dns/
+    "SWITCH|dns.switch.ch|https://dns.switch.ch/dns-query"
+    # https://dns.njal.la/
+    "Njalla|dns.njal.la|https://dns.njal.la/dns-query"
+    # https://blahdns.com/ — Германия; JP/CH/FI закрыты в 2024 году.
+    "BlahDNS-DE|dot-de.blahdns.com|https://doh-de.blahdns.com/dns-query"
+    # https://dismail.de/info.html
+    "dismail|fdns1.dismail.de|https://fdns1.dismail.de/dns-query"
+    # https://openbld.net/
+    "OpenBLD||https://ada.openbld.net/dns-query"
+    # https://github.com/bebasid/bebasdns
+    "BebasDNS|dns.bebasid.com|https://dns.bebasid.com/dns-query"
+    # https://dns.digitalsize.net/
+    "DigitalSize|dns.digitalsize.net|https://dns.digitalsize.net/dns-query"
+    # https://github.com/hagezi/dns-servers/blob/main/CHEATSHEET.md
+    "HaGeZi|root.hagezi.org|https://root.hagezi.org/dns-query"
+    # https://www.dnscry.pt/public-resolvers/lis01
+    "dnscry.pt-Lisbon|lis01.dnscry.pt|https://lis01.dnscry.pt/dns-query"
+    # https://dns4all.eu/
+    "DNS4all|dot.dns4all.eu|https://doh.dns4all.eu/dns-query"
+    # https://www.belnet.be/en/communities-services/all-services/connectivity-and-internet/dns-service/dns-service-technical-faq
+    "Belnet||https://dns.belnet.be/dns-query"
+    # Презентация CERT-EE: https://ega.ee/wp-content/uploads/2022/11/CERT-EE_introduction_UA.pdf
+    "CERT-EE||https://dns.cert.ee/dns-query"
 )
 
 if (( $# > 0 )); then
