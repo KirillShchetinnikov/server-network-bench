@@ -259,7 +259,7 @@ check_doh()
             --header 'Accept: application/dns-message' \
             --dump-header "$tmp_headers" \
             --output "$tmp_body" \
-            --write-out '%{http_code}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_total}|%{http_version}' \
+            --write-out '%{http_code}|%{remote_ip}|%{time_connect}|%{time_appconnect}|%{time_total}|%{http_version}|%{time_pretransfer}' \
             "${url}${separator}dns=${DNS_QUERY_B64}" \
             2>/dev/null
     )"
@@ -302,6 +302,7 @@ check_doh()
     local tls_time
     local total_time
     local http_version
+    local pretransfer_time
 
     IFS='|' read -r \
         http_code \
@@ -310,6 +311,7 @@ check_doh()
         tls_time \
         total_time \
         http_version \
+        pretransfer_time \
         <<< "$curl_meta"
 
     if [[ "$http_code" != "200" ]]; then
@@ -377,10 +379,11 @@ PY
         IFS=':' read -r _ rcode answers <<< "$validation"
 
         printf \
-            'OK|%s HTTP/%s %.0fms rcode=%s answers=%s\n' \
+            'OK|%s HTTP/%s total=%.0fms query=%.0fms rcode=%s answers=%s\n' \
             "$remote_ip" \
             "$http_version" \
             "$(awk "BEGIN {print $total_time * 1000}")" \
+            "$(awk -v total="$total_time" -v ready="$pretransfer_time" 'BEGIN { elapsed = total - ready; print (elapsed > 0 ? elapsed : 0) * 1000 }')" \
             "$rcode" \
             "$answers"
     else
@@ -495,6 +498,7 @@ try:
             # Отправляем настоящий DNS query
             # ------------------------------------------------
 
+            query_start = time.monotonic()
             tls.sendall(wire_packet)
 
             # Сначала получаем размер DNS message
@@ -578,11 +582,13 @@ try:
             total_ms = (
                 end - start
             ) * 1000
+            query_ms = (end - query_start) * 1000
 
             print(
                 "OK|"
                 f"{ip} "
-                f"{total_ms:.0f}ms "
+                f"total={total_ms:.0f}ms "
+                f"query={query_ms:.0f}ms "
                 f"tcp={tcp_ms:.0f}ms "
                 f"tls={tls_ms:.0f}ms "
                 f"rcode={rcode} "
@@ -837,6 +843,16 @@ print_result()
     fi
 }
 
+query_time()
+{
+    local result="$1"
+    if [[ "$result" =~ query=([0-9]+)ms ]]; then
+        printf '%sms' "${BASH_REMATCH[1]}"
+    else
+        printf 'n/a'
+    fi
+}
+
 # ------------------------------------------------------------
 # Запуск
 # ------------------------------------------------------------
@@ -891,7 +907,7 @@ echo
 echo "Summary"
 printf '%*s\n' 60 '' | tr ' ' '-'
 
-printf "%-16s %-10s %-10s\n" \
+printf "%-16s %-18s %-18s\n" \
     "PROVIDER" \
     "DoT/853" \
     "DoH/443"
@@ -906,7 +922,7 @@ for provider_data in "${PROVIDERS[@]}"; do
     doh_status="${doh%%|*}"
 
     if [[ "$dot_status" == "OK" ]]; then
-        dot_display="OK"
+        dot_display="OK ($(query_time "$dot"))"
     elif [[ "$dot_status" == "SKIP" ]]; then
         dot_display="SKIP"
     else
@@ -914,14 +930,14 @@ for provider_data in "${PROVIDERS[@]}"; do
     fi
 
     if [[ "$doh_status" == "OK" ]]; then
-        doh_display="OK"
+        doh_display="OK ($(query_time "$doh"))"
     elif [[ "$doh_status" == "SKIP" ]]; then
         doh_display="SKIP"
     else
         doh_display="BLOCKED"
     fi
 
-    printf "%-16s %-10s %-10s\n" \
+    printf "%-16s %-18s %-18s\n" \
         "$name" \
         "$dot_display" \
         "$doh_display"
@@ -934,6 +950,8 @@ echo "  OK      = TLS verified + DNS query succeeded (rcode=0, answers>0)"
 echo "  BLOCKED = failure at DNS/TCP/TLS/HTTP/DNS-response stage"
 echo "            A failure alone does not prove intentional blocking."
 echo "  SKIP    = protocol address not configured"
+echo "  query   = DNS request/response time, excluding connection setup"
+echo "  total   = connection setup + DNS request/response time"
 echo
 
 echo "Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)"
@@ -945,11 +963,13 @@ available=0
 for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
     if [[ "${DOT_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoT: %s (порт 853)\n' "$name" "$dot_host"
+        printf '  %-16s DoT: %s (порт 853) — ответ: %s\n' \
+            "$name" "$dot_host" "$(query_time "${DOT_RESULTS[$name]}")"
         available=$((available + 1))
     fi
     if [[ "${DOH_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoH: %s\n' "$name" "$doh_url"
+        printf '  %-16s DoH: %s — ответ: %s\n' \
+            "$name" "$doh_url" "$(query_time "${DOH_RESULTS[$name]}")"
         available=$((available + 1))
     fi
 done
