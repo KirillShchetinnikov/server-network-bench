@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -u
+export LC_NUMERIC=C
 
 # ============================================================
 # DoH / DoT connectivity tester
@@ -26,6 +27,7 @@ set -u
 TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
 TIMEOUT="${TIMEOUT:-5}"
 DNS_LANG="${DNS_LANG:-ru}"
+REPEATS="${REPEATS:-1}"
 
 # Перевод применяется только при выводе; внутренние статусы и метрики
 # сохраняют одинаковый формат независимо от выбранного языка.
@@ -110,6 +112,10 @@ This test cannot identify who redirects queries: ISP, router, VPN or local softw
 total=|всего=
 query=|запрос=
 answers=|ответов=
+avg=|среднее=
+checks=|проверок=
+repeat failed at attempt|ошибка повторной проверки на попытке
+missing query timing|нет времени запроса
 TRANSLATIONS
         while [[ "$details" =~ ([0-9]+)ms ]]; do
             details="${details//"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}мс"}"
@@ -123,16 +129,19 @@ print_help()
     msg 'Проверка шифрованного DNS и перехвата обычного DNS' \
         'Encrypted DNS connectivity and plain DNS interception checker'
     printf '\n\n'
-    msg 'Запуск: bash check-encrypted-dns.sh [--lang ru|en] ["ИМЯ|АДРЕС" ...]' \
-        'Usage: bash check-encrypted-dns.sh [--lang ru|en] ["NAME|ADDRESS" ...]'
+    msg 'Запуск: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] ["ИМЯ|АДРЕС" ...]' \
+        'Usage: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] ["NAME|ADDRESS" ...]'
     printf '\n\n'
     msg '  --lang ru|en  Язык вывода: русский (по умолчанию) или английский' \
         '  --lang ru|en  Output language: Russian (default) or English'
     printf '\n'
+    msg '  --repeats N   Дополнительные проверки после успеха (по умолчанию 1; 0 — без повторов)' \
+        '  --repeats N   Extra checks after success (default 1; 0 disables repeats)'
+    printf '\n'
     msg '  -h, --help    Показать справку' '  -h, --help    Show help'
     printf '\n\n'
-    msg 'Переменные: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5' \
-        'Environment: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5'
+    msg 'Переменные: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1' \
+        'Environment: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1'
     printf '\n\n'
     msg 'Форматы провайдеров (аргументы заменяют встроенный список):' \
         'Provider formats (arguments replace the built-in list):'
@@ -155,6 +164,17 @@ while (( $# > 0 )); do
             shift 2
             ;;
         --lang=*) DNS_LANG="${1#*=}"; shift ;;
+        --repeats)
+            if (( $# < 2 )); then
+                msg 'Ошибка: после --repeats укажите число повторов.' \
+                    'Error: --repeats requires a repeat count.' >&2
+                printf '\n' >&2
+                exit 1
+            fi
+            REPEATS="$2"
+            shift 2
+            ;;
+        --repeats=*) REPEATS="${1#*=}"; shift ;;
         -h|--help) show_help=true; shift ;;
         --) shift; CUSTOM_PROVIDERS+=("$@"); break ;;
         -*)
@@ -308,6 +328,28 @@ for cmd in curl python3; do
         exit 1
     fi
 done
+
+if ! REPEATS="$(python3 - "$REPEATS" <<'PY'
+import os
+import re
+import sys
+
+try:
+    if not re.fullmatch(r"[0-9]+", sys.argv[1]):
+        raise ValueError()
+    repeats = int(sys.argv[1])
+    if repeats > sys.maxsize - 1:
+        raise ValueError()
+    print(repeats)
+except ValueError:
+    print("Error: REPEATS must be a non-negative integer within the system integer range"
+          if os.environ["DNS_LANG"] == "en"
+          else "Ошибка: REPEATS должен быть неотрицательным целым числом в пределах системного диапазона", file=sys.stderr)
+    sys.exit(1)
+PY
+)"; then
+    exit 1
+fi
 
 if ! python3 - "$TIMEOUT" <<'PY'
 import math
@@ -1005,12 +1047,74 @@ print_cell()
 
 query_time()
 {
-    local result="$1"
-    if [[ "$result" =~ query=([0-9]+)ms ]]; then
-        printf '%s%s' "${BASH_REMATCH[1]}" "$(msg 'мс' 'ms')"
+    local value
+    if value="$(latency_ms "$1")"; then
+        printf '%s%s' "$value" "$(msg 'мс' 'ms')"
     else
         msg 'нет данных' 'n/a'
     fi
+}
+
+latency_ms()
+{
+    local result="$1"
+    if [[ "$result" =~ avg=([0-9]+([.][0-9]+)?)ms ||
+          "$result" =~ query=([0-9]+([.][0-9]+)?)ms ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+}
+
+check_with_repeats()
+{
+    local checker="$1" address="$2" result first_result sample
+    local successful=1 attempt=1 total_ms elapsed average
+    result="$("$checker" "$address")"
+    if [[ "$result" != OK\|* ]]; then
+        printf '%s checks=0/1\n' "$result"
+        return
+    fi
+    first_result="$result"
+    total_ms="$(latency_ms "$result")" || {
+        printf 'FAIL|invalid DNS response: missing query timing checks=0/1\n'
+        return
+    }
+    # Каждый протокол проверяется независимо. После любой ошибки повторов нет.
+    for ((attempt=2; attempt <= REPEATS + 1; attempt++)); do
+        sample="$("$checker" "$address")"
+        if [[ "$sample" != OK\|* ]]; then
+            printf 'FAIL|repeat failed at attempt %s: %s checks=%s/%s\n' \
+                "$attempt" "${sample#*|}" "$successful" "$attempt"
+            return
+        fi
+        elapsed="$(latency_ms "$sample")" || {
+            printf 'FAIL|invalid DNS response: missing query timing checks=%s/%s\n' "$successful" "$attempt"
+            return
+        }
+        total_ms="$(awk -v total="$total_ms" -v elapsed="$elapsed" 'BEGIN { printf "%.3f", total + elapsed }')"
+        successful=$((successful + 1))
+    done
+    average="$(awk -v total="$total_ms" -v count="$successful" 'BEGIN { printf "%.1f", total / count }')"
+    printf '%s avg=%sms checks=%s/%s\n' "$first_result" "$average" "$successful" "$successful"
+}
+
+available_rows()
+{
+    local provider_data name dot_host doh_url result checks
+    for provider_data in "${PROVIDERS[@]}"; do
+        parse_provider "$provider_data" || return 1
+        result="${DOT_RESULTS[$name]}"
+        if [[ "$result" == OK\|* ]]; then
+            checks="${result##*checks=}"
+            printf '%s|%s|DoT|%s|%s\n' "$(latency_ms "$result")" "$name" "$dot_host" "$checks"
+        fi
+        result="${DOH_RESULTS[$name]}"
+        if [[ "$result" == OK\|* ]]; then
+            checks="${result##*checks=}"
+            printf '%s|%s|DoH|%s|%s\n' "$(latency_ms "$result")" "$name" "$doh_url" "$checks"
+        fi
+    done
 }
 
 # ------------------------------------------------------------
@@ -1021,6 +1125,7 @@ echo
 echo "$(msg 'Проверка доступности шифрованного DNS' 'Encrypted DNS connectivity test')"
 printf '%s: %s A\n' "$(msg 'Тестовый запрос' 'Test query')" "$TEST_DOMAIN"
 printf '%s: %s%s\n' "$(msg 'Время ожидания' 'Timeout')" "$TIMEOUT" "$(msg 'с' 's')"
+printf '%s: %s\n' "$(msg 'Дополнительные проверки после успеха' 'Extra checks after success')" "$REPEATS"
 echo
 
 print_cell "$(msg 'ПРОВАЙДЕР' 'PROVIDER')" 18
@@ -1037,7 +1142,7 @@ for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
 
     dot_result="SKIP|not configured"
-    [[ -n "$dot_host" ]] && dot_result="$(check_dot "$dot_host")"
+    [[ -n "$dot_host" ]] && dot_result="$(check_with_repeats check_dot "$dot_host")"
 
     DOT_RESULTS["$name"]="$dot_result"
 
@@ -1047,7 +1152,7 @@ for provider_data in "${PROVIDERS[@]}"; do
         "$dot_result"
 
     doh_result="SKIP|not configured"
-    [[ -n "$doh_url" ]] && doh_result="$(check_doh "$doh_url")"
+    [[ -n "$doh_url" ]] && doh_result="$(check_with_repeats check_doh "$doh_url")"
 
     DOH_RESULTS["$name"]="$doh_result"
 
@@ -1109,6 +1214,8 @@ echo "$(msg '               Ошибка сама по себе не доказ�
 echo "$(msg '  ПРОПУЩЕН   = адрес протокола не указан' '  SKIP    = protocol address not configured')"
 echo "$(msg '  запрос     = время обмена DNS-запросом и ответом без установки соединения' '  query   = DNS request/response time, excluding connection setup')"
 echo "$(msg '  всего      = установка соединения и обмен DNS-запросом и ответом' '  total   = connection setup + DNS request/response time')"
+echo "$(msg '  среднее    = среднее время запроса по всем успешным проверкам (включая первую)' '  avg     = mean query time across successful checks, including the first')"
+echo "$(msg '  проверок   = успешные проверки / выполненные проверки; при ошибке повторы прекращаются' '  checks  = successful / performed checks; repeats stop on any error')"
 echo
 
 echo "$(msg 'Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)' 'Unencrypted DNS interception test (UDP/53 and TCP/53)')"
@@ -1116,21 +1223,16 @@ localize_details "$(check_plain_dns_interception)"
 
 echo
 echo "$(msg 'Доступные DNS, которые можно использовать (на момент проверки):' 'Available DNS services you can use (at the time of this test):')"
+echo "$(msg '  От быстрых к медленным по среднему времени ответа; только без ошибок во всех попытках.' '  Fastest first by mean response time; only services with no failed checks.')"
 available=0
-for provider_data in "${PROVIDERS[@]}"; do
-    parse_provider "$provider_data" || exit 1
-    if [[ "${DOT_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoT: %s (%s 853) — %s: %s\n' \
-            "$name" "$dot_host" "$(msg 'порт' 'port')" \
-            "$(msg 'ответ' 'response')" "$(query_time "${DOT_RESULTS[$name]}")"
-        available=$((available + 1))
-    fi
-    if [[ "${DOH_RESULTS[$name]}" == OK\|* ]]; then
-        printf '  %-16s DoH: %s — %s: %s\n' \
-            "$name" "$doh_url" "$(msg 'ответ' 'response')" "$(query_time "${DOH_RESULTS[$name]}")"
-        available=$((available + 1))
-    fi
-done
+while IFS='|' read -r average name proto address checks; do
+    printf '  %-16s %s: %s' "$name" "$proto" "$address"
+    [[ "$proto" == DoT ]] && printf ' (%s 853)' "$(msg 'порт' 'port')"
+    printf ' — %s: %s%s; %s: %s\n' \
+        "$(msg 'средний ответ' 'mean response')" "$average" "$(msg 'мс' 'ms')" \
+        "$(msg 'проверок' 'checks')" "$checks"
+    available=$((available + 1))
+done < <(available_rows | LC_ALL=C sort -s -t '|' -k1,1n)
 if (( available == 0 )); then
     echo "$(msg '  Нет DNS, успешно прошедших проверку.' '  No DNS services passed the checks.')"
 fi
