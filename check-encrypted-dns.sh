@@ -15,6 +15,7 @@ export LC_NUMERIC=C
 #   bash
 #   curl
 #   python3
+#   timeout (GNU coreutils)
 #
 # Запуск:
 #   chmod +x check-encrypted-dns.sh
@@ -116,6 +117,8 @@ avg=|среднее=
 checks=|проверок=
 repeat failed at attempt|ошибка повторной проверки на попытке
 missing query timing|нет времени запроса
+overall limit|общий лимит
+checker error, exit status|ошибка проверки, код завершения
 TRANSLATIONS
         while [[ "$details" =~ ([0-9]+)ms ]]; do
             details="${details//"${BASH_REMATCH[0]}"/"${BASH_REMATCH[1]}мс"}"
@@ -322,7 +325,7 @@ done
 # Проверка зависимостей
 # ------------------------------------------------------------
 
-for cmd in curl python3; do
+for cmd in curl python3 timeout; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         printf '%s: %s\n' "$(msg 'Ошибка: команда не найдена' 'Error: command not found')" "$cmd" >&2
         exit 1
@@ -433,6 +436,13 @@ fi
 # DoH
 # ------------------------------------------------------------
 
+run_bounded()
+{
+    # Отдельный процесс ограничивает также зависший системный DNS-резолвер.
+    # KILL завершает всю группу: блокирующий вызов не продлевает таймаут.
+    { timeout --signal=KILL "${TIMEOUT}s" "$@"; } 2>/dev/null
+}
+
 check_doh()
 {
     local url="$1"
@@ -448,7 +458,7 @@ check_doh()
     local separator='?'
     [[ "$url" == *'?'* ]] && separator='&'
     curl_meta="$(
-        curl \
+        run_bounded curl \
             --silent \
             --show-error \
             --location \
@@ -474,8 +484,8 @@ check_doh()
             7)
                 echo "FAIL|TCP connect failed"
                 ;;
-            28)
-                echo "FAIL|timeout"
+            28|124|137)
+                echo "FAIL|timeout (overall limit: ${TIMEOUT}s)"
                 ;;
             35)
                 echo "FAIL|TLS handshake failed"
@@ -596,8 +606,9 @@ PY
 check_dot()
 {
     local host="$1"
+    local result result_rc
 
-    python3 - "$host" "$TEST_DOMAIN" "$TIMEOUT" <<'PY'
+    result="$(run_bounded python3 - "$host" "$TEST_DOMAIN" "$TIMEOUT" <<'PY'
 import socket
 import ssl
 import struct
@@ -607,6 +618,14 @@ import time
 host = sys.argv[1]
 domain = sys.argv[2].rstrip(".")
 timeout = float(sys.argv[3])
+deadline = time.monotonic() + timeout
+
+
+def remaining():
+    budget = deadline - time.monotonic()
+    if budget <= 0:
+        raise TimeoutError("timeout")
+    return budget
 
 try:
     # --------------------------------------------------------
@@ -675,7 +694,7 @@ try:
                 socket.SOCK_STREAM
             )
 
-            sock.settimeout(timeout)
+            sock.settimeout(remaining())
 
             sock.connect(
                 (ip, 853)
@@ -685,6 +704,7 @@ try:
 
             context = ssl.create_default_context()
 
+            sock.settimeout(remaining())
             tls = context.wrap_socket(
                 sock,
                 server_hostname=host
@@ -697,12 +717,14 @@ try:
             # ------------------------------------------------
 
             query_start = time.monotonic()
+            tls.settimeout(remaining())
             tls.sendall(wire_packet)
 
             # Сначала получаем размер DNS message
             length_data = b""
 
             while len(length_data) < 2:
+                tls.settimeout(remaining())
                 chunk = tls.recv(2 - len(length_data))
 
                 if not chunk:
@@ -720,6 +742,7 @@ try:
             response = b""
 
             while len(response) < response_length:
+                tls.settimeout(remaining())
                 chunk = tls.recv(
                     response_length - len(response)
                 )
@@ -819,6 +842,8 @@ try:
             last_error = (
                 f"{ip}:853 timeout"
             )
+            if time.monotonic() >= deadline:
+                break
 
         except OSError as e:
 
@@ -871,6 +896,13 @@ try:
 except Exception as e:
     print(f"FAIL|{e}")
 PY
+)"
+    result_rc=$?
+    case "$result_rc" in
+        124|137) printf 'FAIL|timeout (overall limit: %ss)\n' "$TIMEOUT" ;;
+        0) printf '%s\n' "$result" ;;
+        *) printf 'FAIL|checker error, exit status %s\n' "$result_rc" ;;
+    esac
 }
 
 # ------------------------------------------------------------

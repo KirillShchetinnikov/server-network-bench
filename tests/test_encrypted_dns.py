@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -113,6 +114,81 @@ class CheckerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("REPEATS must", result.stderr)
                 self.assertFalse(counts)
+
+
+class TimeoutTests(unittest.TestCase):
+    def run_probe(self, checker, mode):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Эмуляция блокирующего резолвера и медленных сокетов без сети.
+            (root / "sitecustomize.py").write_text(r'''
+import os, socket, ssl, struct, time
+mode = os.environ.get("PROBE_MODE")
+def resolve(*args):
+    if mode == "resolve":
+        time.sleep(5)
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 853))
+            for ip in ("192.0.2.1", "192.0.2.2", "192.0.2.3")]
+class SlowSocket:
+    def __init__(self, *args): self.wait = 5; self.data = b""
+    def settimeout(self, value): self.wait = value
+    def delay(self, duration):
+        time.sleep(min(duration, self.wait))
+        if self.wait <= duration: raise TimeoutError("timed out")
+    def connect(self, address):
+        if mode == "multiple":
+            self.delay(0.12)
+            raise ConnectionRefusedError()
+    def sendall(self, data):
+        question = data[14:]
+        response = struct.pack("!6H", 0x1234, 0x8180, 1, 1, 0, 0) + question
+        self.data = struct.pack("!H", len(response)) + response
+    def recv(self, size):
+        self.delay(0.06)
+        chunk, self.data = self.data[:1], self.data[1:]
+        return chunk
+    def close(self): pass
+class Context:
+    def wrap_socket(self, sock, **kwargs): return sock
+if mode in ("resolve", "multiple", "dribble"):
+    socket.getaddrinfo = resolve
+    socket.socket = SlowSocket
+    ssl.create_default_context = Context
+''')
+            # Медленный curl игнорирует свои параметры --max-time.
+            curl = root / "curl"
+            curl.write_text("#!/bin/sh\nsleep 5\n")
+            curl.chmod(0o755)
+            command = PREFIX + f'\n{checker} dns.example\n'
+            started = time.monotonic()
+            result = subprocess.run(
+                ["bash", "-c", command],
+                env={**os.environ, "DNS_LANG": "en", "TIMEOUT": "0.2",
+                     "TEST_DOMAIN": "example.com", "REPEATS": "0",
+                     "PROBE_MODE": mode, "PYTHONPATH": directory,
+                     "PATH": directory + os.pathsep + os.environ["PATH"]},
+                capture_output=True, text=True, timeout=2,
+            )
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FAIL|", result.stdout)
+        self.assertIn("timeout", result.stdout)
+        self.assertNotIn("Killed", result.stderr)
+        # Допуск включает запуск Bash и трёх подготовительных Python-процессов.
+        self.assertLess(elapsed, 0.9, result.stdout)
+
+    def test_blocking_name_resolution_is_bounded(self):
+        self.run_probe("check_dot", "resolve")
+
+    def test_multiple_addresses_share_one_deadline(self):
+        self.run_probe("check_dot", "multiple")
+
+    def test_fragmented_response_does_not_reset_deadline(self):
+        self.run_probe("check_dot", "dribble")
+
+    def test_hanging_curl_is_bounded(self):
+        self.run_probe("check_doh", "curl")
 
 
 if __name__ == "__main__":
