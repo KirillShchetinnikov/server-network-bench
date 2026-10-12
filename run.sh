@@ -9,11 +9,12 @@ PROJECT_URL='https://github.com/KirillShchetinnikov/server-network-bench'
 
 checks=(ip-region censorcheck-geoblock censorcheck-dpi russian-iperf3 yabs ip-check bench sysbench-cpu)
 selected=()
+requested_ips=()
 run_mode=background
 
 usage() {
   cat <<'EOF'
-Usage: ./run.sh [--only NAME ...] [--background|--foreground] [--list] [--help]
+Usage: ./run.sh [--only NAME ...] [--ip ADDRESS ...] [--background|--foreground] [--list] [--help]
 
 Run all checks in the background by default, continuing after terminal exit.
 Use --foreground to keep output in the terminal. --only may be repeated.
@@ -21,10 +22,16 @@ Set REPORT_DIR to choose where logs are saved.
 Text and Markdown reports, and a short summary, are saved in that directory.
 Missing iperf3 and sysbench are installed automatically (root or sudo required).
 --only ipquality is an alias for --only ip-check.
+ip-check tests every public address assigned to this server by default.
+--ip ADDRESS selects an address for ip-check; may be repeated (IPv4 or IPv6).
 EOF
 }
 
 check_title() {
+  if [[ $1 == ip-check@* ]]; then
+    printf 'IP Quality Check: %s' "${1#ip-check@}"
+    return
+  fi
   case $1 in
     ip-region) printf 'IP region' ;;
     censorcheck-geoblock) printf 'Censorcheck: геоблок' ;;
@@ -43,7 +50,7 @@ check_source_url() {
     censorcheck-geoblock|censorcheck-dpi) printf 'https://github.com/vernette/censorcheck/blob/master/censorcheck.sh' ;;
     russian-iperf3) printf 'https://github.com/itdoginfo/russian-iperf3-servers/blob/main/speedtest.sh' ;;
     yabs) printf 'https://github.com/masonr/yet-another-bench-script/blob/master/yabs.sh' ;;
-    ip-check) printf 'https://github.com/xykt/IPQuality/blob/main/ip.sh' ;;
+    ip-check|ip-check@*) printf 'https://github.com/xykt/IPQuality/blob/main/ip.sh' ;;
     bench) printf 'https://github.com/teddysun/across/blob/master/bench.sh' ;;
     sysbench-cpu) printf 'https://github.com/akopytov/sysbench' ;;
   esac
@@ -64,6 +71,14 @@ while (($#)); do
     --help|-h) usage; exit 0 ;;
     --background) run_mode=background; shift ;;
     --foreground) run_mode=foreground; shift ;;
+    --ip)
+      if (($# < 2)) || [[ -z $2 || $2 == -* ]]; then
+        printf 'После --ip требуется IP-адрес.\n' >&2
+        exit 2
+      fi
+      requested_ips+=("$2")
+      shift 2
+      ;;
     --only)
       if (($# < 2)) || ! contains_check "$2"; then
         printf 'Unknown or missing check after --only: %s\n' "${2:-}" >&2
@@ -83,6 +98,14 @@ while (($#)); do
 done
 
 if ((${#selected[@]} == 0)); then selected=("${checks[@]}"); fi
+if ((${#requested_ips[@]})); then
+  ip_check_selected=0
+  for name in "${selected[@]}"; do [[ $name == ip-check ]] && ip_check_selected=1; done
+  if ((ip_check_selected == 0)); then
+    printf '%s\n' '--ip применяется только к проверке ip-check.' >&2
+    exit 2
+  fi
+fi
 if ! command -v curl >/dev/null 2>&1; then
   printf 'curl is required.\n' >&2
   exit 2
@@ -153,6 +176,7 @@ if [[ $run_mode == background ]]; then
   fi
   child_args=(--foreground)
   for name in "${selected[@]}"; do child_args+=(--only "$name"); done
+  for address in "${requested_ips[@]}"; do child_args+=(--ip "$address"); done
   BENCH_RUN_TIME="$RUN_TIME" REPORT_DIR="$REPORT_DIR" \
     nohup bash "$runner" "${child_args[@]}" > "$REPORT_DIR/live-output.log" 2>&1 < /dev/null &
   pid=$!
@@ -218,6 +242,7 @@ public_ip() {
 
 strip_terminal_controls() {
   local check=$1
+  [[ $check == ip-check@* ]] && check=ip-check
   LC_ALL=C sed -u -E $'s/\033\\][^\a\033]*(\a|\033\\\\)//g; s/\033\\[[0-?]*[ -/]*[@-~]//g; s/\033.//g' |
     LC_ALL=C awk -v check="$check" '
       {
@@ -286,6 +311,65 @@ run_check() {
   fi
 }
 
+discover_check_ips() {
+  python3 - "${requested_ips[@]}" <<'PY'
+import ipaddress
+import json
+import subprocess
+import sys
+
+try:
+    interfaces = json.loads(subprocess.check_output(["ip", "-j", "address", "show"], text=True))
+    assigned = set()
+    public = []
+    for interface in interfaces:
+        for info in interface.get("addr_info", []):
+            address = ipaddress.ip_address(info["local"])
+            assigned.add(address)
+            if address.is_global and not address.is_multicast and address not in public:
+                public.append(address)
+    targets = public
+    if sys.argv[1:]:
+        targets = []
+        for value in sys.argv[1:]:
+            address = ipaddress.ip_address(value)
+            if address not in assigned:
+                raise ValueError(f"IP-адрес {address} не назначен интерфейсам сервера")
+            if not address.is_global or address.is_multicast:
+                raise ValueError(f"IP-адрес {address} не является публичным")
+            if address not in targets:
+                targets.append(address)
+    for address in targets:
+        print(address)
+except (ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+    print(f"Не удалось выбрать IP для ip-check: {error}", file=sys.stderr)
+    sys.exit(2)
+PY
+}
+
+# Expand ip-check into separate runs so every address has its own log and status.
+expanded_checks=()
+for name in "${selected[@]}"; do
+  if [[ $name != ip-check ]]; then
+    expanded_checks+=("$name")
+    continue
+  fi
+  for tool in python3 ip; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      printf 'Для выбора IP в ip-check требуется %s.\n' "$tool" >&2
+      exit 2
+    fi
+  done
+  targets=$(discover_check_ips) || exit 2
+  if [[ -z $targets ]]; then
+    printf 'Публичные IP на интерфейсах не найдены; ip-check проверит обычный исходящий адрес (например, через NAT).\n'
+    expanded_checks+=(ip-check)
+  else
+    while IFS= read -r address; do expanded_checks+=("ip-check@$address"); done <<< "$targets"
+  fi
+done
+selected=("${expanded_checks[@]}")
+
 RUN_STARTED=$SECONDS
 server_hostname=$(hostname 2>/dev/null) || server_hostname='н/д'
 server_os=$( . /etc/os-release 2>/dev/null; printf '%s' "${PRETTY_NAME:-н/д}" )
@@ -315,6 +399,12 @@ for name in "${selected[@]}"; do
     russian-iperf3) run_check "$name" 'https://github.com/itdoginfo/russian-iperf3-servers/raw/main/speedtest.sh' ;;
     yabs) run_check "$name" 'https://yabs.sh' -4 ;;
     ip-check) run_check "$name" 'https://ip.check.place' -l en -y ;;
+    ip-check@*)
+      address=${name#ip-check@}
+      family=-4
+      [[ $address == *:* ]] && family=-6
+      run_check "$name" 'https://ip.check.place' -l en -y -f "$family" -i "$address"
+      ;;
     bench) run_check "$name" 'https://bench.sh' ;;
     sysbench-cpu) run_check "$name" '' ;;
   esac
