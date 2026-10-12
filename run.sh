@@ -19,6 +19,7 @@ Run all checks in the background by default, continuing after terminal exit.
 Use --foreground to keep output in the terminal. --only may be repeated.
 Set REPORT_DIR to choose where logs are saved.
 Text and Markdown reports, and a short summary, are saved in that directory.
+Missing iperf3 and sysbench are installed automatically (root or sudo required).
 --only ipquality is an alias for --only ip-check.
 EOF
 }
@@ -91,6 +92,49 @@ mkdir -p -- "$REPORT_DIR" || exit 2
 REPORT_DIR=$(cd -- "$REPORT_DIR" && pwd) || exit 2
 REPORT_FILE="$REPORT_DIR/server-report-$RUN_TIME.txt"
 REPORT_MD_FILE="$REPORT_DIR/server-report-$RUN_TIME.md"
+
+install_bench_tools() {
+  local tool
+  local -a missing=() privilege=()
+  for tool in iperf3 sysbench; do
+    command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+  done
+  ((${#missing[@]})) || return 0
+  if ((EUID != 0)); then
+    if ! command -v sudo >/dev/null 2>&1 || ! sudo -v; then
+      printf 'Для установки %s запустите скрипт с правами root или настройте sudo.\n' "${missing[*]}" >&2
+      return 1
+    fi
+    privilege=(sudo)
+  fi
+  printf 'Установка недостающих утилит: %s\n' "${missing[*]}"
+  if command -v apt-get >/dev/null 2>&1; then
+    "${privilege[@]}" env DEBIAN_FRONTEND=noninteractive apt-get update &&
+      "${privilege[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
+  elif command -v dnf >/dev/null 2>&1; then
+    "${privilege[@]}" dnf install -y "${missing[@]}"
+  elif command -v yum >/dev/null 2>&1; then
+    "${privilege[@]}" yum install -y "${missing[@]}"
+  elif command -v apk >/dev/null 2>&1; then
+    "${privilege[@]}" apk add "${missing[@]}"
+  elif command -v zypper >/dev/null 2>&1; then
+    "${privilege[@]}" zypper --non-interactive install "${missing[@]}"
+  elif command -v pacman >/dev/null 2>&1; then
+    "${privilege[@]}" pacman -S --needed --noconfirm "${missing[@]}"
+  else
+    printf 'Не найден поддерживаемый менеджер пакетов. Установите вручную: %s\n' "${missing[*]}" >&2
+    return 1
+  fi || return 1
+  for tool in "${missing[@]}"; do
+    command -v "$tool" >/dev/null 2>&1 || return 1
+  done
+}
+
+# Install before detaching so sudo can request a password in the terminal.
+if ! install_bench_tools 2>&1 | tee -a "$REPORT_DIR/dependencies.log"; then
+  printf 'Не удалось установить зависимости. Подробности: %s/dependencies.log\n' "$REPORT_DIR" >&2
+  exit 2
+fi
 
 if [[ $run_mode == background ]]; then
   if ! command -v nohup >/dev/null 2>&1; then
