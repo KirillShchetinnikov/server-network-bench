@@ -4,12 +4,13 @@ set -u
 export LC_NUMERIC=C
 
 # ============================================================
-# DoH / DoT connectivity tester
+# DoH / DoT / UDP / TCP DNS connectivity tester
 #
 # Проверяет реальный DNS-запрос example.com A:
 #
 #   DoH: RFC 8484, HTTPS/443, application/dns-message
 #   DoT: RFC 7858, TLS/TCP/853
+#   Plain DNS: UDP/53 and TCP/53, each published IP tested separately
 #
 # Требования:
 #   bash
@@ -29,6 +30,7 @@ TEST_DOMAIN="${TEST_DOMAIN:-example.com}"
 TIMEOUT="${TIMEOUT:-5}"
 DNS_LANG="${DNS_LANG:-ru}"
 REPEATS="${REPEATS:-1}"
+PROTOCOL="${PROTOCOL:-all}"
 
 # Перевод применяется только при выводе; внутренние статусы и метрики
 # сохраняют одинаковый формат независимо от выбранного языка.
@@ -104,6 +106,8 @@ truncated DNS record|неполная DNS-запись
 trailing DNS data|лишние данные в DNS-ответе
 DNS response from TEST-NET|DNS-ответ от адреса TEST-NET
 no DNS response|нет DNS-ответа
+truncated DNS response; TCP must be tested separately|неполный DNS-ответ; TCP проверяется отдельно
+no published plain DNS address|публичный адрес обычного DNS не подтверждён
 INTERCEPTED|ПЕРЕХВАТ
 NO_REPLY|НЕТ ОТВЕТА
 INCONCLUSIVE|НЕОПРЕДЕЛЁННО
@@ -129,11 +133,11 @@ TRANSLATIONS
 
 print_help()
 {
-    msg 'Проверка шифрованного DNS и перехвата обычного DNS' \
-        'Encrypted DNS connectivity and plain DNS interception checker'
+    msg 'Проверка DNS: DoH, DoT, UDP/53, TCP/53 и перехват' \
+        'DNS connectivity: DoH, DoT, UDP/53, TCP/53 and interception checker'
     printf '\n\n'
-    msg 'Запуск: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] ["ИМЯ|АДРЕС" ...]' \
-        'Usage: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] ["NAME|ADDRESS" ...]'
+    msg 'Запуск: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] [--protocol all|dot|doh|plain] ["ИМЯ|АДРЕС" ...]' \
+        'Usage: bash check-encrypted-dns.sh [--lang ru|en] [--repeats N] [--protocol all|dot|doh|plain] ["NAME|ADDRESS" ...]'
     printf '\n\n'
     msg '  --lang ru|en  Язык вывода: русский (по умолчанию) или английский' \
         '  --lang ru|en  Output language: Russian (default) or English'
@@ -141,14 +145,21 @@ print_help()
     msg '  --repeats N   Дополнительные проверки после успеха (по умолчанию 1; 0 — без повторов)' \
         '  --repeats N   Extra checks after success (default 1; 0 disables repeats)'
     printf '\n'
+    msg '  --protocol all|dot|doh|plain  Протоколы проверки (по умолчанию all)' \
+        '  --protocol all|dot|doh|plain  Protocols to test (default all)'
+    printf '\n'
     msg '  -h, --help    Показать справку' '  -h, --help    Show help'
     printf '\n\n'
-    msg 'Переменные: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1' \
-        'Environment: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1'
+    msg 'Переменные: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1, PROTOCOL=all' \
+        'Environment: DNS_LANG=ru|en, TEST_DOMAIN=example.com, TIMEOUT=5, REPEATS=1, PROTOCOL=all'
     printf '\n\n'
     msg 'Форматы провайдеров (аргументы заменяют встроенный список):' \
         'Provider formats (arguments replace the built-in list):'
     printf '\n'
+    msg '  ИМЯ|DOT_HOST|DOH_URL|IP1,IP2  Обычные DNS IPv4/IPv6, поля могут быть пустыми' \
+        '  NAME|DOT_HOST|DOH_URL|IP1,IP2  Plain IPv4/IPv6 DNS; fields may be empty'
+    printf '\n'
+    printf '  "Google plain|||8.8.8.8,8.8.4.4"\n'
     printf '  "Google|dns.google"\n  "DoH only|https://dns.google/dns-query"\n  "DoT only|dns.google|"\n  "Cloudflare|one.one.one.one|https://cloudflare-dns.com/dns-query"\n'
 }
 
@@ -177,6 +188,13 @@ while (( $# > 0 )); do
             REPEATS="$2"
             shift 2
             ;;
+        --protocol)
+            if (( $# < 2 )); then
+                printf '%s\n' "$(msg 'Ошибка: после --protocol укажите all, dot, doh или plain.' 'Error: --protocol requires all, dot, doh or plain.')" >&2
+                exit 1
+            fi
+            PROTOCOL="$2"; shift 2 ;;
+        --protocol=*) PROTOCOL="${1#*=}"; shift ;;
         --repeats=*) REPEATS="${1#*=}"; shift ;;
         -h|--help) show_help=true; shift ;;
         --) shift; CUSTOM_PROVIDERS+=("$@"); break ;;
@@ -193,65 +211,75 @@ if [[ "$DNS_LANG" != ru && "$DNS_LANG" != en ]]; then
     exit 1
 fi
 export DNS_LANG
+case "$PROTOCOL" in
+    all|dot|doh|plain) ;;
+    *) printf '%s: %s (all|dot|doh|plain)\n' "$(msg 'Ошибка: неподдерживаемый протокол' 'Error: unsupported protocol')" "$PROTOCOL" >&2; exit 1 ;;
+esac
+protocol_enabled()
+{
+    [[ "$PROTOCOL" == all || "$PROTOCOL" == "$1" ]]
+}
 if $show_help; then
     print_help
     exit 0
 fi
 
 # Формат:
+# NAME|DOT_HOST|DOH_URL|PLAIN_IPS — IP-адреса разделяются запятыми.
 # NAME|DOT_HOST|DOH_URL — любой адрес можно оставить пустым.
 # NAME|HOST — DoT на HOST и DoH на https://HOST/dns-query.
 # NAME|https://HOST/path — только DoH, без попыток угадать DoT.
 # NAME|HOST| — только DoT.
 # Можно передать записи аргументами вместо встроенного списка:
 # ./check-encrypted-dns.sh 'Google|dns.google' 'AliDNS|https://dns.alidns.com/dns-query'
+# Обычные IPv4 DNS: источники и пропуски в docs/plain-dns-providers.md (2026-10-12).
 PROVIDERS=(
-    "Yandex|common.dot.dns.yandex.net|https://common.dot.dns.yandex.net/dns-query"
-    "Cloudflare|one.one.one.one|https://cloudflare-dns.com/dns-query"
-    "Google|dns.google|https://dns.google/dns-query"
-    "Quad9|dns.quad9.net|https://dns.quad9.net/dns-query"
-    "AdGuard|dns.adguard-dns.com|https://dns.adguard-dns.com/dns-query"
+    "Yandex|common.dot.dns.yandex.net|https://common.dot.dns.yandex.net/dns-query|77.88.8.8,77.88.8.1"
+    "Cloudflare|one.one.one.one|https://cloudflare-dns.com/dns-query|1.1.1.1,1.0.0.1"
+    "Google|dns.google|https://dns.google/dns-query|8.8.8.8,8.8.4.4"
+    "Quad9|dns.quad9.net|https://dns.quad9.net/dns-query|9.9.9.9,149.112.112.112"
+    "AdGuard|dns.adguard-dns.com|https://dns.adguard-dns.com/dns-query|94.140.14.14,94.140.15.15"
     "Mullvad|dns.mullvad.net|https://dns.mullvad.net/dns-query"
-    "CleanBrowsing|security-filter-dns.cleanbrowsing.org|https://doh.cleanbrowsing.org/doh/security-filter/"
-    "DNS.SB|dot.sb|https://doh.dns.sb/dns-query"
-    "DNSPod|dot.pub|https://dns.pub/dns-query"
-    "AliDNS||https://dns.alidns.com/dns-query"
-    "360DNS||https://doh.360.cn/dns-query"
+    "CleanBrowsing|security-filter-dns.cleanbrowsing.org|https://doh.cleanbrowsing.org/doh/security-filter/|185.228.168.9,185.228.169.9"
+    "DNS.SB|dot.sb|https://doh.dns.sb/dns-query|185.222.222.222,45.11.45.11"
+    "DNSPod|dot.pub|https://dns.pub/dns-query|119.29.29.29"
+    "AliDNS||https://dns.alidns.com/dns-query|223.5.5.5,223.6.6.6"
+    "360DNS||https://doh.360.cn/dns-query|101.226.4.6,218.30.118.6"
 
     # Ещё 30 сервисов. Адреса сверены с источниками операторов 2026-10-07.
     # DoT оставлен пустым, если источник подтверждает только DoH.
     # https://docs.controld.com/docs/free-dns
-    "ControlD|p0.freedns.controld.com|https://freedns.controld.com/p0"
+    "ControlD|p0.freedns.controld.com|https://freedns.controld.com/p0|76.76.2.0,76.76.10.0"
     # https://meta.wikimedia.org/wiki/Wikimedia_DNS
     "Wikimedia|wikimedia-dns.org|https://wikimedia-dns.org/dns-query"
     # https://joindns4.eu/for-public
-    "DNS4EU|unfiltered.joindns4.eu|https://unfiltered.joindns4.eu/dns-query"
+    "DNS4EU|unfiltered.joindns4.eu|https://unfiltered.joindns4.eu/dns-query|86.54.11.100,86.54.11.200"
     # https://umbrella.cisco.com/blog/enhancing-support-dns-encryption-with-dns-over-https
-    "OpenDNS|dns.opendns.com|https://dns.opendns.com/dns-query"
+    "OpenDNS|dns.opendns.com|https://dns.opendns.com/dns-query|208.67.222.222,208.67.220.220"
     # https://libredns.gr/
     "LibreDNS|dot.libredns.gr|https://doh.libredns.gr/dns-query"
     # https://dnsforge.de/
-    "dnsforge|dnsforge.de|https://dnsforge.de/dns-query"
+    "dnsforge|dnsforge.de|https://dnsforge.de/dns-query|49.12.67.122,91.99.154.175,176.9.93.198,176.9.1.117"
     # https://dnswarden.com/
     "DNSwarden|uncensored.dns.dnswarden.com|https://dns.dnswarden.com/uncensored"
     # https://www.digitale-gesellschaft.ch/dns/
     "DigitaleGesell.|dns.digitale-gesellschaft.ch|https://dns.digitale-gesellschaft.ch/dns-query"
     # https://ffmuc.net/wiki/doku.php?id=knb:dohdot
-    "FFMUC|dot.ffmuc.net|https://doh.ffmuc.net/dns-query"
+    "FFMUC|dot.ffmuc.net|https://doh.ffmuc.net/dns-query|5.1.66.255,185.150.99.255"
     # https://blog.uncensoreddns.org/dns-servers/
     "UncensoredDNS|anycast.uncensoreddns.org|https://anycast.uncensoreddns.org/dns-query"
     # https://www.fdn.fr/actions/dns/
-    "FDN|ns0.fdn.fr|https://ns0.fdn.fr/dns-query"
+    "FDN|ns0.fdn.fr|https://ns0.fdn.fr/dns-query|80.67.169.12,80.67.169.40"
     # https://rethinkdns.com/configure
     "RethinkDNS||https://sky.bravedns.com/"
     # https://applied-privacy.net/services/dns/
     "AppliedPrivacy|dot1.applied-privacy.net|https://doh.applied-privacy.net/query"
     # https://www.cira.ca/en/how-canadian-shield-works/
-    "CIRA|private.canadianshield.cira.ca|https://private.canadianshield.cira.ca/dns-query"
+    "CIRA|private.canadianshield.cira.ca|https://private.canadianshield.cira.ca/dns-query|149.112.121.10,149.112.122.10"
     # https://www.comss.ru/page.php?id=7315
-    "Comss.one|dns.comss.one|https://dns.comss.one/dns-query"
+    "Comss.one|dns.comss.one|https://dns.comss.one/dns-query|83.220.169.155,212.109.195.93"
     # https://www.nic.cz/odvr/
-    "CZ.NIC|odvr.nic.cz|https://odvr.nic.cz/"
+    "CZ.NIC|odvr.nic.cz|https://odvr.nic.cz/|193.17.47.1,185.43.135.1"
     # https://policy.public.dns.iij.jp/
     "IIJ|public.dns.iij.jp|https://public.dns.iij.jp/dns-query"
     # https://restena.lu/en/document/190-configuring-your-server-public-dns-resolver
@@ -259,11 +287,11 @@ PROVIDERS=(
     # https://portal.switch.ch/pub/public-dns/
     "SWITCH|dns.switch.ch|https://dns.switch.ch/dns-query"
     # https://dns.njal.la/
-    "Njalla|dns.njal.la|https://dns.njal.la/dns-query"
+    "Njalla|dns.njal.la|https://dns.njal.la/dns-query|95.215.19.53"
     # https://blahdns.com/ — Германия; JP/CH/FI закрыты в 2024 году.
     "BlahDNS-DE|dot-de.blahdns.com|https://doh-de.blahdns.com/dns-query"
     # https://dismail.de/info.html
-    "dismail|fdns1.dismail.de|https://fdns1.dismail.de/dns-query"
+    "dismail|fdns1.dismail.de|https://fdns1.dismail.de/dns-query|116.203.32.217,159.69.114.157"
     # https://openbld.net/
     "OpenBLD||https://ada.openbld.net/dns-query"
     # https://github.com/bebasid/bebasdns
@@ -275,7 +303,7 @@ PROVIDERS=(
     # https://www.dnscry.pt/public-resolvers/lis01
     "dnscry.pt-Lisbon|lis01.dnscry.pt|https://lis01.dnscry.pt/dns-query"
     # https://dns4all.eu/
-    "DNS4all|dot.dns4all.eu|https://doh.dns4all.eu/dns-query"
+    "DNS4all|dot.dns4all.eu|https://doh.dns4all.eu/dns-query|194.0.5.3"
     # https://www.belnet.be/en/communities-services/all-services/connectivity-and-internet/dns-service/dns-service-technical-faq
     "Belnet||https://dns.belnet.be/dns-query"
     # Презентация CERT-EE: https://ega.ee/wp-content/uploads/2022/11/CERT-EE_introduction_UA.pdf
@@ -288,8 +316,8 @@ fi
 
 parse_provider()
 {
-    local entry="$1" address
-    name="" dot_host="" doh_url=""
+    local entry="$1" address extra
+    name="" dot_host="" doh_url="" plain_ips=""
     if [[ "$entry" != *'|'* ]]; then
         printf '%s: %s\n' "$(msg 'Ошибка: ожидается ИМЯ|АДРЕС' 'Error: expected NAME|ADDRESS')" "$entry" >&2
         return 1
@@ -297,14 +325,14 @@ parse_provider()
     name="${entry%%|*}"
     address="${entry#*|}"
     if [[ "$address" == *'|'* ]]; then
-        IFS='|' read -r dot_host doh_url <<< "$address"
+        IFS='|' read -r dot_host doh_url plain_ips extra <<< "$address"
     elif [[ "$address" == https://* ]]; then
         doh_url="$address"
     elif [[ -n "$address" ]]; then
         dot_host="$address"
         doh_url="https://${address}/dns-query"
     fi
-    if [[ -z "$name" || ( -z "$dot_host" && -z "$doh_url" ) ||
+    if [[ "${entry//[^|]/}" == "||||"* || -z "$name" || ( -z "$dot_host" && -z "$doh_url" && -z "$plain_ips" ) ||
           "$doh_url" == *'|'* || ( -n "$doh_url" && "$doh_url" != https://* ) ]]; then
         printf '%s: %s\n' "$(msg 'Ошибка: некорректная запись провайдера' 'Error: invalid provider record')" "$entry" >&2
         return 1
@@ -325,12 +353,35 @@ done
 # Проверка зависимостей
 # ------------------------------------------------------------
 
-for cmd in curl python3 timeout; do
+dependencies=(python3 timeout)
+protocol_enabled doh && dependencies+=(curl)
+for cmd in "${dependencies[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         printf '%s: %s\n' "$(msg 'Ошибка: команда не найдена' 'Error: command not found')" "$cmd" >&2
         exit 1
     fi
 done
+
+plain_ip_lists=()
+for provider_data in "${PROVIDERS[@]}"; do
+    parse_provider "$provider_data" || exit 1
+    [[ -n "$plain_ips" ]] && plain_ip_lists+=("$plain_ips")
+done
+if ! python3 - "${plain_ip_lists[@]}" <<'PYIP'
+import ipaddress
+import sys
+try:
+    for addresses in sys.argv[1:]:
+        for address in addresses.split(','):
+            ipaddress.ip_address(address)
+except ValueError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(1)
+PYIP
+then
+    printf '%s\n' "$(msg 'Ошибка: некорректный список DNS IP-адресов' 'Error: invalid DNS IP address list')" >&2
+    exit 1
+fi
 
 if ! REPEATS="$(python3 - "$REPEATS" <<'PY'
 import os
@@ -906,6 +957,138 @@ PY
 }
 
 # ------------------------------------------------------------
+# Обычный DNS: UDP и TCP проверяются независимо, без автоматического перехода.
+check_plain_dns()
+{
+    local address="$1" proto="$2" result result_rc
+    result="$(run_bounded python3 - "$address" "$proto" "$TEST_DOMAIN" "$TIMEOUT" <<'PYPLAIN'
+import ipaddress
+import secrets
+import socket
+import struct
+import sys
+import time
+
+ip, proto, domain, timeout = sys.argv[1:]
+domain = domain.rstrip('.').encode('idna').decode('ascii').lower()
+timeout = float(timeout)
+start = time.monotonic()
+deadline = start + timeout
+
+
+def remaining():
+    budget = deadline - time.monotonic()
+    if budget <= 0:
+        raise TimeoutError('timeout')
+    return budget
+
+
+def read_name(data, offset):
+    labels, visited, end = [], set(), None
+    while True:
+        if offset in visited or offset >= len(data):
+            raise ValueError("invalid DNS name")
+        visited.add(offset)
+        size = data[offset]
+        if size & 0xc0 == 0xc0:
+            if offset + 1 >= len(data):
+                raise ValueError("truncated DNS pointer")
+            if end is None:
+                end = offset + 2
+            offset = ((size & 0x3f) << 8) | data[offset + 1]
+            continue
+        if size & 0xc0:
+            raise ValueError("invalid DNS label")
+        offset += 1
+        if size == 0:
+            return b".".join(labels).lower(), end if end is not None else offset
+        if offset + size > len(data):
+            raise ValueError("truncated DNS label")
+        labels.append(data[offset:offset + size])
+        offset += size
+
+
+def validate(data, query_id, domain):
+    if len(data) < 12:
+        raise ValueError("short DNS response")
+    ident, flags, qd, an, ns, ar = struct.unpack("!6H", data[:12])
+    if ident != query_id or not flags & 0x8000 or flags & 0x7800 or qd != 1:
+        raise ValueError("unrelated DNS response")
+    name, offset = read_name(data, 12)
+    if name != domain.encode() or data[offset:offset + 4] != struct.pack("!HH", 1, 1):
+        raise ValueError("unrelated DNS question")
+    offset += 4
+    for _ in range(an + ns + ar):
+        _, offset = read_name(data, offset)
+        if offset + 10 > len(data):
+            raise ValueError("truncated DNS record")
+        length = struct.unpack("!H", data[offset + 8:offset + 10])[0]
+        offset += 10 + length
+        if offset > len(data):
+            raise ValueError("truncated DNS record data")
+    if offset != len(data):
+        raise ValueError("trailing DNS data")
+    return flags & 15, an
+
+
+try:
+    query_id = secrets.randbelow(65536)
+    qname = b''.join(bytes([len(label)]) + label.encode() for label in domain.split('.')) + b'\0'
+    query = struct.pack('!6H', query_id, 0x0100, 1, 0, 0, 0) + qname + struct.pack('!HH', 1, 1)
+    family = socket.AF_INET6 if ipaddress.ip_address(ip).version == 6 else socket.AF_INET
+    kind = socket.SOCK_DGRAM if proto == 'UDP' else socket.SOCK_STREAM
+    with socket.socket(family, kind) as sock:
+        sock.settimeout(remaining())
+        sock.connect((ip, 53))
+        query_start = time.monotonic()
+
+        def recv_exact(size):
+            data = bytearray()
+            while len(data) < size:
+                sock.settimeout(remaining())
+                chunk = sock.recv(size - len(data))
+                if not chunk:
+                    raise ValueError('connection closed during DNS response')
+                data.extend(chunk)
+            return bytes(data)
+
+        sock.settimeout(remaining())
+        if proto == 'UDP':
+            sock.send(query)
+            while True:
+                sock.settimeout(remaining())
+                data = sock.recv(65535)
+                # Ignore stale transaction IDs; they cannot count as success.
+                if len(data) >= 2 and struct.unpack('!H', data[:2])[0] == query_id:
+                    break
+        else:
+            sock.sendall(struct.pack('!H', len(query)) + query)
+            size = struct.unpack('!H', recv_exact(2))[0]
+            data = recv_exact(size)
+        received = time.monotonic()
+        rcode, answers = validate(data, query_id, domain)
+        if struct.unpack('!H', data[2:4])[0] & 0x0200:
+            raise ValueError('truncated DNS response; TCP must be tested separately')
+        if rcode != 0 or answers == 0:
+            raise ValueError(f'unusable DNS response: rcode={rcode} answers={answers}')
+        print(f'OK|{ip} query={(received-query_start)*1000:.1f}ms total={(received-start)*1000:.1f}ms rcode={rcode} answers={answers}')
+except (OSError, ValueError) as exc:
+    print(f'FAIL|{ip}: {exc}')
+PYPLAIN
+)"
+    result_rc=$?
+    if (( result_rc == 124 || result_rc == 137 )); then
+        printf 'FAIL|%s: timeout (overall limit %ss)\n' "$address" "$TIMEOUT"
+    elif (( result_rc != 0 )); then
+        printf 'FAIL|checker error, exit status %s\n' "$result_rc"
+    else
+        printf '%s\n' "$result"
+    fi
+}
+
+check_udp() { check_plain_dns "$1" UDP; }
+check_tcp() { check_plain_dns "$1" TCP; }
+
 # Проверка прозрачного перехвата обычного DNS (UDP/TCP 53).
 # TEST-NET адреса по RFC 5737 не должны обслуживать публичный DNS.
 # https://www.rfc-editor.org/rfc/rfc5737#section-4
@@ -1133,20 +1316,20 @@ check_with_repeats()
 
 available_rows()
 {
-    local provider_data name dot_host doh_url result checks
-    for provider_data in "${PROVIDERS[@]}"; do
-        parse_provider "$provider_data" || return 1
-        result="${DOT_RESULTS[$name]}"
+    local row name proto address result checks
+    for row in "${RESULT_ROWS[@]}"; do
+        IFS='|' read -r name proto address result <<< "$row"
         if [[ "$result" == OK\|* ]]; then
             checks="${result##*checks=}"
-            printf '%s|%s|DoT|%s|%s\n' "$(latency_ms "$result")" "$name" "$dot_host" "$checks"
-        fi
-        result="${DOH_RESULTS[$name]}"
-        if [[ "$result" == OK\|* ]]; then
-            checks="${result##*checks=}"
-            printf '%s|%s|DoH|%s|%s\n' "$(latency_ms "$result")" "$name" "$doh_url" "$checks"
+            printf '%s|%s|%s|%s|%s\n' "$(latency_ms "$result")" "$name" "$proto" "$address" "$checks"
         fi
     done
+}
+
+record_result()
+{
+    RESULT_ROWS+=("$name|$1|$2|$3")
+    print_result "$1" "$name" "$3"
 }
 
 # ------------------------------------------------------------
@@ -1154,7 +1337,8 @@ available_rows()
 # ------------------------------------------------------------
 
 echo
-echo "$(msg 'Проверка доступности шифрованного DNS' 'Encrypted DNS connectivity test')"
+echo "$(msg 'Проверка доступности DNS' 'DNS connectivity test')"
+printf '%s: %s\n' "$(msg 'Протоколы' 'Protocols')" "$PROTOCOL"
 printf '%s: %s A\n' "$(msg 'Тестовый запрос' 'Test query')" "$TEST_DOMAIN"
 printf '%s: %s%s\n' "$(msg 'Время ожидания' 'Timeout')" "$TIMEOUT" "$(msg 'с' 's')"
 printf '%s: %s\n' "$(msg 'Дополнительные проверки после успеха' 'Extra checks after success')" "$REPEATS"
@@ -1167,91 +1351,67 @@ printf '%s\n' "$(msg 'ПОДРОБНОСТИ' 'DETAILS')"
 
 printf '%*s\n' 90 '' | tr ' ' '-'
 
-declare -A DOH_RESULTS
-declare -A DOT_RESULTS
-
+RESULT_ROWS=()
 for provider_data in "${PROVIDERS[@]}"; do
     parse_provider "$provider_data" || exit 1
-
-    dot_result="SKIP|not configured"
-    [[ -n "$dot_host" ]] && dot_result="$(check_with_repeats check_dot "$dot_host")"
-
-    DOT_RESULTS["$name"]="$dot_result"
-
-    print_result \
-        "DoT" \
-        "$name" \
-        "$dot_result"
-
-    doh_result="SKIP|not configured"
-    [[ -n "$doh_url" ]] && doh_result="$(check_with_repeats check_doh "$doh_url")"
-
-    DOH_RESULTS["$name"]="$doh_result"
-
-    print_result \
-        "DoH" \
-        "$name" \
-        "$doh_result"
-
+    if protocol_enabled dot; then
+        result="SKIP|not configured"
+        [[ -n "$dot_host" ]] && result="$(check_with_repeats check_dot "$dot_host")"
+        record_result DoT "$dot_host" "$result"
+    fi
+    if protocol_enabled doh; then
+        result="SKIP|not configured"
+        [[ -n "$doh_url" ]] && result="$(check_with_repeats check_doh "$doh_url")"
+        record_result DoH "$doh_url" "$result"
+    fi
+    if protocol_enabled plain; then
+        if [[ -z "$plain_ips" ]]; then
+            record_result UDP/53 "" 'SKIP|no published plain DNS address'
+            record_result TCP/53 "" 'SKIP|no published plain DNS address'
+        else
+            IFS=',' read -r -a addresses <<< "$plain_ips"
+            for address in "${addresses[@]}"; do
+                record_result UDP/53 "$address" "$(check_with_repeats check_udp "$address")"
+                record_result TCP/53 "$address" "$(check_with_repeats check_tcp "$address")"
+            done
+        fi
+    fi
 done
-
-# ------------------------------------------------------------
-# Summary
-# ------------------------------------------------------------
 
 echo
 echo "$(msg 'Сводная таблица' 'Summary')"
-printf '%*s\n' 60 '' | tr ' ' '-'
-
 print_cell "$(msg 'ПРОВАЙДЕР' 'PROVIDER')" 18
-print_cell 'DoT/853' 26
-printf '%s\n' 'DoH/443'
-
-for provider_data in "${PROVIDERS[@]}"; do
-    parse_provider "$provider_data" || exit 1
-
-    dot="${DOT_RESULTS[$name]}"
-    doh="${DOH_RESULTS[$name]}"
-
-    dot_status="${dot%%|*}"
-    doh_status="${doh%%|*}"
-
-    if [[ "$dot_status" == "OK" ]]; then
-        dot_display="$(status_text OK) ($(query_time "$dot"))"
-    elif [[ "$dot_status" == "SKIP" ]]; then
-        dot_display="$(status_text SKIP)"
-    else
-        dot_display="$(status_text BLOCKED)"
-    fi
-
-    if [[ "$doh_status" == "OK" ]]; then
-        doh_display="$(status_text OK) ($(query_time "$doh"))"
-    elif [[ "$doh_status" == "SKIP" ]]; then
-        doh_display="$(status_text SKIP)"
-    else
-        doh_display="$(status_text BLOCKED)"
-    fi
-
+print_cell "$(msg 'ПРОТОКОЛ' 'PROTO')" 10
+print_cell "$(msg 'АДРЕС' 'ADDRESS')" 48
+printf '%s\n' "$(msg 'СТАТУС / СРЕДНЕЕ' 'STATUS / AVG')"
+for row in "${RESULT_ROWS[@]}"; do
+    IFS='|' read -r name proto address result <<< "$row"
     print_cell "$name" 18
-    print_cell "$dot_display" 26
-    printf '%s\n' "$doh_display"
-
+    print_cell "$proto" 10
+    print_cell "${address:--}" 48
+    printf '%s' "$(status_text "${result%%|*}")"
+    [[ "$result" == OK\|* ]] && printf ' (%s)' "$(query_time "$result")"
+    printf '\n'
 done
 
 echo
 echo "$(msg 'Пояснения:' 'Interpretation:')"
-echo "$(msg '  ДОСТУПЕН   = TLS-сертификат проверен, DNS-запрос успешен (rcode=0, ответов>0)' '  OK      = TLS verified + DNS query succeeded (rcode=0, answers>0)')"
+echo "$(msg '  ДОСТУПЕН   = DNS-запрос успешен (rcode=0, ответов>0); для DoH/DoT также проверен TLS' '  OK      = DNS query succeeded (rcode=0, answers>0); TLS verified for DoH/DoT')"
 echo "$(msg '  НЕДОСТУПЕН = ошибка определения IP-адреса, TCP, TLS, HTTP или DNS-ответа' '  BLOCKED = failure at DNS/TCP/TLS/HTTP/DNS-response stage')"
 echo "$(msg '               Ошибка сама по себе не доказывает намеренную блокировку.' '            A failure alone does not prove intentional blocking.')"
-echo "$(msg '  ПРОПУЩЕН   = адрес протокола не указан' '  SKIP    = protocol address not configured')"
+echo "$(msg '  ПРОПУЩЕН   = адрес протокола не указан или не подтверждён' '  SKIP    = protocol address not configured or not confirmed')"
 echo "$(msg '  запрос     = время обмена DNS-запросом и ответом без установки соединения' '  query   = DNS request/response time, excluding connection setup')"
 echo "$(msg '  всего      = установка соединения и обмен DNS-запросом и ответом' '  total   = connection setup + DNS request/response time')"
 echo "$(msg '  среднее    = среднее время запроса по всем успешным проверкам (включая первую)' '  avg     = mean query time across successful checks, including the first')"
 echo "$(msg '  проверок   = успешные проверки / выполненные проверки; при ошибке повторы прекращаются' '  checks  = successful / performed checks; repeats stop on any error')"
 echo
 
-echo "$(msg 'Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)' 'Unencrypted DNS interception test (UDP/53 and TCP/53)')"
-localize_details "$(check_plain_dns_interception)"
+if protocol_enabled plain; then
+    echo "$(msg 'Проверка перехвата незашифрованного DNS (UDP/53 и TCP/53)' 'Unencrypted DNS interception test (UDP/53 and TCP/53)')"
+    echo "$(msg '  Контрольные адреса TEST-NET: отсутствие ответа ожидаемо и не означает недоступность реальных DNS.' '  TEST-NET control addresses: no reply is expected and does not mean real DNS services are unavailable.')"
+    localize_details "$(check_plain_dns_interception)"
+    echo "$(msg '  Ответ от обычного DNS не удостоверяет провайдера: возможен выборочный перехват.' '  A plain DNS reply does not authenticate the provider: selective interception is possible.')"
+fi
 
 echo
 echo "$(msg 'Доступные DNS, которые можно использовать (на момент проверки):' 'Available DNS services you can use (at the time of this test):')"

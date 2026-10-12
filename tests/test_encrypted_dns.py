@@ -33,6 +33,8 @@ fake_check() {
 }
 check_dot() { fake_check DoT "$1"; }
 check_doh() { fake_check DoH "$1"; }
+check_udp() { fake_check UDP "$1"; }
+check_tcp() { fake_check TCP "$1"; }
 check_plain_dns_interception() { echo 'NO_REPLY no DNS response'; }
 '''
 PROVIDERS = [
@@ -50,7 +52,7 @@ class CheckerTests(unittest.TestCase):
             result = subprocess.run(
                 ["bash", "-c", PREFIX + MOCKS + SOURCE[START:], "checker",
                  *args, *providers],
-                env={**os.environ, "DNS_LANG": "en", "REPEATS": "1",
+                env={**os.environ, "PROTOCOL": "all", "DNS_LANG": "en", "REPEATS": "1",
                      "TEST_DOMAIN": "example.com", "TIMEOUT": "1",
                      **env, "FAKE_STATE": directory},
                 capture_output=True, text=True, timeout=15,
@@ -114,6 +116,155 @@ class CheckerTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("REPEATS must", result.stderr)
                 self.assertFalse(counts)
+
+    def test_protocol_selection_sends_only_selected_queries(self):
+        providers = ["One|one.example|https://one.example/dns-query|1.1.1.1,8.8.8.8"]
+        for protocol, expected in (("dot", {"DoT"}), ("doh", {"DoH"}),
+                                   ("plain", {"UDP", "TCP"}),
+                                   ("all", {"DoT", "DoH", "UDP", "TCP"})):
+            with self.subTest(protocol=protocol):
+                result, counts = self.run_checker(["--protocol", protocol], providers)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual({key.split("-")[0] for key in counts}, expected)
+                self.assertTrue(all(count == 2 for count in counts.values()))
+                self.assertEqual("TEST-NET control addresses" in result.stdout,
+                                 protocol in ("plain", "all"))
+                final = result.stdout.split("Available DNS services", 1)[1]
+                if protocol == "plain":
+                    self.assertNotIn("DoT", final)
+                    self.assertNotIn("DoH", final)
+                    for address in ("1.1.1.1", "8.8.8.8"):
+                        for transport in ("UDP/53", "TCP/53"):
+                            self.assertIn(f"{transport}: {address}", final)
+
+    def test_protocol_environment_and_cli_override(self):
+        result, counts = self.run_checker(PROTOCOL="doh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(key.startswith("DoH-") for key in counts))
+        result, counts = self.run_checker(["--protocol=dot"], PROTOCOL="plain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(key.startswith("DoT-") for key in counts))
+
+    def test_plain_only_record_and_unpublished_address(self):
+        result, counts = self.run_checker(["--protocol=plain"],
+                                         ["Plain|||1.1.1.1", "Encrypted|one.example|"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(counts), 2)
+        self.assertIn("no published plain DNS address", result.stdout)
+        final = result.stdout.split("Available DNS services", 1)[1]
+        self.assertNotIn("Encrypted", final)
+
+    def test_invalid_protocol_and_plain_records_send_no_queries(self):
+        for args, providers in ((["--protocol=bad"], PROVIDERS),
+                                (["--protocol"], []),
+                                ([], ["Bad|||1.1.1.1,"]),
+                                ([], ["Bad|||dns.example"]),
+                                ([], ["Bad|||1.1.1.1|extra"]),
+                                ([], ["Bad|||999.1.1.1"]),
+                                ([], ["Bad|||1.1.1.1||"])):
+            with self.subTest(args=args, providers=providers):
+                result, counts = self.run_checker(args, providers)
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(counts)
+
+
+class PlainProbeTests(unittest.TestCase):
+    def run_probe(self, transport="UDP", mode="valid", ip="1.1.1.1"):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sitecustomize.py").write_text(r'''import os, socket, struct, time
+mode = os.environ.get("PLAIN_MODE")
+class FakeSocket:
+    def __init__(self, family, kind):
+        self.kind = kind
+        expected = socket.AF_INET6 if ':' in os.environ['PLAIN_IP'] else socket.AF_INET
+        assert family == expected
+        self.data = b''
+        self.wait = 1
+        self.stale = mode == 'stale'
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def settimeout(self, value): self.wait = value
+    def connect(self, address):
+        assert address == (os.environ['PLAIN_IP'], 53)
+        if mode == 'refused': raise ConnectionRefusedError('connection refused')
+    def make_response(self, query):
+        ident = struct.unpack('!H', query[:2])[0]
+        flags = 0x8180
+        if mode == 'nxdomain': flags |= 3
+        if mode == 'truncated': flags |= 0x0200
+        count = 0 if mode == 'empty' else 1
+        if mode == 'wrong_id': ident ^= 1
+        question = query[12:]
+        if mode == 'wrong_question': question = question.replace(b'example', b'invalid')
+        if mode == 'not_response': flags &= ~0x8000
+        self.data = struct.pack('!6H', ident, flags, 1, count, 0, 0) + question
+        if count:
+            self.data += b'\xc0\x0c' + struct.pack('!HHIH', 1, 1, 60, 4) + b'\x01\x02\x03\x04'
+        if mode == 'short_record': self.data = self.data[:-1]
+        if mode == 'trailing': self.data += b'junk'
+        if self.kind == socket.SOCK_STREAM:
+            self.data = struct.pack('!H', len(self.data)) + self.data
+    def send(self, query): self.make_response(query); return len(query)
+    def sendall(self, query): self.make_response(query[2:])
+    def recv(self, size):
+        if mode == 'timeout' or mode == 'wrong_id':
+            time.sleep(self.wait)
+            raise TimeoutError('timed out')
+        if mode == 'dribble':
+            delay = min(0.04, self.wait)
+            time.sleep(delay)
+            if delay == self.wait: raise TimeoutError('timed out')
+        if self.stale:
+            self.stale = False
+            ident = struct.unpack('!H', self.data[:2])[0]
+            return struct.pack('!H', ident ^ 1) + self.data[2:]
+        # Deliberately fragmented TCP messages test recv_exact.
+        length = min(size, 1) if self.kind == socket.SOCK_STREAM else size
+        chunk, self.data = self.data[:length], self.data[length:]
+        return chunk
+if mode:
+    socket.socket = FakeSocket
+''')
+            command = PREFIX + f'\ncheck_plain_dns "{ip}" "{transport}"\n'
+            started = time.monotonic()
+            result = subprocess.run(["bash", "-c", command],
+                env={**os.environ, "DNS_LANG": "en", "PROTOCOL": "plain",
+                     "TIMEOUT": "0.2", "REPEATS": "0", "TEST_DOMAIN": "Example.COM.",
+                     "PLAIN_MODE": mode, "PLAIN_IP": ip, "PYTHONPATH": directory},
+                capture_output=True, text=True, timeout=3)
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, elapsed
+
+    def test_valid_udp_and_fragmented_tcp_ipv4_and_ipv6(self):
+        for transport in ("UDP", "TCP"):
+            for ip in ("1.1.1.1", "2001:4860:4860::8888"):
+                with self.subTest(transport=transport, ip=ip):
+                    output, _ = self.run_probe(transport, ip=ip)
+                    self.assertIn(f"OK|{ip} query=", output)
+                    self.assertIn("rcode=0 answers=1", output)
+
+    def test_invalid_responses_never_count_as_success(self):
+        for mode in ("nxdomain", "empty", "truncated", "wrong_question",
+                     "not_response", "short_record", "trailing", "wrong_id", "refused"):
+            for transport in ("UDP", "TCP"):
+                with self.subTest(mode=mode, transport=transport):
+                    output, _ = self.run_probe(transport, mode)
+                    self.assertIn("FAIL|", output)
+                    self.assertNotIn("OK|", output)
+
+    def test_udp_ignores_stale_id_and_receives_current_response(self):
+        output, _ = self.run_probe(mode="stale")
+        self.assertIn("OK|", output)
+
+    def test_timeout_and_tcp_dribble_have_one_deadline(self):
+        for transport, mode in (("UDP", "timeout"), ("TCP", "dribble")):
+            with self.subTest(transport=transport, mode=mode):
+                output, elapsed = self.run_probe(transport, mode)
+                self.assertIn("FAIL|", output)
+                self.assertTrue("timed out" in output or "timeout" in output)
+                self.assertLess(elapsed, 1.0, output)
 
 
 class TimeoutTests(unittest.TestCase):
